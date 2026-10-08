@@ -1,4 +1,3 @@
-#include "AsyncUtility.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
@@ -73,13 +72,8 @@ public:
             << targetInfo.getArch() << " falling back to regular load";
       }
       // Emit a regular load
-      auto load =
-          LLVM::LoadOp::create(rewriter, loadLoc, elemTy, ptr, /*alignment*/ 0,
-                               volatileFlag, nonTmpFlag);
-      if (loadOp.getForceNoAlias()) {
-        AMD::addLocalLoadNoAliasScope(load);
-      }
-      return load;
+      return LLVM::LoadOp::create(rewriter, loadLoc, elemTy, ptr,
+                                  /*alignment*/ 0, volatileFlag, nonTmpFlag);
     };
 
     bool useDirectLoad = mlir::matchPattern(mask, mlir::m_One());
@@ -143,12 +137,8 @@ public:
     }
 
     auto createStoreWithAttrs = [&](Location storeLoc) -> LLVM::StoreOp {
-      auto store = LLVM::StoreOp::create(rewriter, storeLoc, val, ptr,
-                                         alignment, volatileFlag, nonTmpFlag);
-      if (storeOp.getForceNoAlias()) {
-        AMD::addLocalLoadNoAliasScope(store);
-      }
-      return store;
+      return LLVM::StoreOp::create(rewriter, storeLoc, val, ptr, alignment,
+                                   volatileFlag, nonTmpFlag);
     };
 
     bool useDirectStore = mlir::matchPattern(mask, mlir::m_One());

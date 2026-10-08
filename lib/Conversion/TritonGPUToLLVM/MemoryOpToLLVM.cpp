@@ -200,7 +200,7 @@ public:
 
     auto outVals = lowerLocalLdSt(loc, ctx, cvt, {}, llvmElemTy, memDescTy,
                                   smemObj, rewriter, targetInfo,
-                                  makeSharedLoadEmitter(targetInfo, op));
+                                  makeSharedLoadEmitter(targetInfo));
 
     Value result =
         packUniqueTensorElements(loc, typeConverter, outVals, rewriter, regTy);

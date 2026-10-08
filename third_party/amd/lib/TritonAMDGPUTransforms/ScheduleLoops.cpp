@@ -1,7 +1,6 @@
 #include "Dialect/TritonAMDGPU/IR/TargetFeatures.h"
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "Utility.h"
-#include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "third_party/amd/include/Analysis/AxisInfoExt.h"
 #include "third_party/amd/lib/TritonAMDGPUTransforms/PipelineUtility.h"
 #include "triton/Analysis/AxisInfo.h"

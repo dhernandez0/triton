@@ -70,7 +70,6 @@ public:
   bool supportsDirectFromLdsStoreBitWidth(int bitWidth) const;
   bool supportsBufferLoadToLocal() const;
 
-  bool requiresAliasInfoForAsyncOps() const;
   bool useAsyncMarks() const;
 
   bool supportsTDM() const;

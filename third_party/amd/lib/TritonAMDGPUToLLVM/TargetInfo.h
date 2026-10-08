@@ -61,8 +61,7 @@ public:
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     Value ctaId, Value val, Value pred) const override;
   Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                    Value ctaId, Type elemTy, Value pred,
-                    Operation *localLoadOp = nullptr) const override;
+                    Value ctaId, Type elemTy, Value pred) const override;
 
   // Describes the parameters of ds_read_tr for a particular data type.
   using LDSTransLoadParams = amdgpu::TargetFeatures::LDSTransLoadParams;
@@ -121,11 +120,6 @@ public:
   // scattering and instead have to write warp coalesced into LDS
   bool supportsDirectToLdsScatter() const;
 
-  // Some architectures (GFX9) require alias information on direct-to-lds loads
-  // and loads from LDS so LLVM does not add conservative waits between those
-  // ops. For such case we ensure syncronization between data hazards via
-  // ttg.async_wait
-  bool requiresAliasInfoForAsyncOps() const;
   bool supportsDirectToLdsLoadBitWidth(int bitWidth) const;
   bool supportsDirectFromLdsStoreBitWidth(int bitWidth) const;
   bool supportsBufferLoadToLocal() const;

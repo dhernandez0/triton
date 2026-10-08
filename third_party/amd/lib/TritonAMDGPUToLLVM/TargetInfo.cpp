@@ -1,7 +1,6 @@
 #include "TargetInfo.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "Utility.h"
-#include "amd/lib/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -284,8 +283,7 @@ TargetInfo::queryLDSTransLoadParams(int bitWidth) const {
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                              Value ctaId, Type elemTy, Value pred,
-                              Operation *localLoadOp) const {
+                              Value ctaId, Type elemTy, Value pred) const {
   if (ctaId) {
     llvm::report_fatal_error(
         "AMDGPU does not support cross-CTA shared memory transfers");
@@ -294,17 +292,13 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
     Type loadTy = i64_ty;
     if (auto vecTy = dyn_cast<VectorType>(elemTy))
       loadTy = vecTy.clone(i64_ty);
-    Value result =
-        loadDShared(rewriter, loc, ptr, ctaId, loadTy, pred, localLoadOp);
+    Value result = loadDShared(rewriter, loc, ptr, ctaId, loadTy, pred);
     return TritonLLVMOpBuilder(loc, rewriter).inttoptr(elemTy, result);
   }
   Value falseVal = LLVM::ConstantOp::create(rewriter, loc, elemTy,
                                             rewriter.getZeroAttr(elemTy));
-  bool addAliasGroup = localLoadOp && requiresAliasInfoForAsyncOps() &&
-                       isSyncedViaAsyncWait(localLoadOp);
-  return mlir::LLVM::AMD::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal, {},
-                                 triton::CacheModifier::NONE,
-                                 /*isVolatile=*/false, addAliasGroup);
+  return mlir::LLVM::AMD::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
+                                 {});
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
@@ -782,10 +776,6 @@ unsigned TargetInfo::getReductionTreeArity(Operation *combinerOp) const {
 
 bool TargetInfo::supportsDirectToLdsScatter() const {
   return targetFeatures.supportsDirectToLdsScatter();
-}
-
-bool TargetInfo::requiresAliasInfoForAsyncOps() const {
-  return targetFeatures.requiresAliasInfoForAsyncOps();
 }
 
 bool TargetInfo::supportsDirectToLdsLoadBitWidth(int bitWidth) const {

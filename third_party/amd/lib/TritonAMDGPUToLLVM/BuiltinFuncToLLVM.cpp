@@ -1,6 +1,5 @@
 #include "TritonAMDGPUToLLVM/Passes.h"
 
-#include "AsyncUtility.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"

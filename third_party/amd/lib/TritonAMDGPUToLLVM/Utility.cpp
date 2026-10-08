@@ -476,19 +476,16 @@ Value emitCtaMulticastMask(RewriterBase &rewriter, Location loc, Value groupId,
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, Value multicastMask,
-             triton::CacheModifier cm, bool isVolatile,
-             bool forceNoAliasAsyncLoads) {
-  return triton::amdgpu::MaskedLoadOp::create(
-             rewriter, loc, elemTy, ptr, pred, falseVal, multicastMask, cm,
-             isVolatile, forceNoAliasAsyncLoads)
+             triton::CacheModifier cm, bool isVolatile) {
+  return triton::amdgpu::MaskedLoadOp::create(rewriter, loc, elemTy, ptr, pred,
+                                              falseVal, multicastMask, cm,
+                                              isVolatile)
       .getResult();
 }
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
-             Value pred, triton::CacheModifier cm,
-             bool forceNoAliasAsyncLoads) {
-  triton::amdgpu::MaskedStoreOp::create(rewriter, loc, ptr, val, pred, cm,
-                                        forceNoAliasAsyncLoads);
+             Value pred, triton::CacheModifier cm) {
+  triton::amdgpu::MaskedStoreOp::create(rewriter, loc, ptr, val, pred, cm);
 }
 
 // Create the auxiliary/cachepolicy value of ROCDL::RawPtrBufferLoad/StoreOp

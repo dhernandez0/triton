@@ -1,4 +1,3 @@
-#include "AsyncUtility.h"
 #include "AtomicRMWOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
@@ -32,7 +31,7 @@ static LLVM::FenceOp createAMDGPUMemoryFence(OpBuilder &builder, Location loc,
 
 // Creates and returns the result Value of a single ds_read_tr* op for the
 // given (isaFamily, logicalBitWidth).
-static Value createDsReadTr(Operation *op, RewriterBase &rewriter, Location loc,
+static Value createDsReadTr(RewriterBase &rewriter, Location loc,
                             Value vecAddr, VectorType vTy, ISAFamily isaFamily,
                             unsigned logicalBitWidth) {
   // tr16 instructions return vectors of bf16/f16 while tr8 and tr4
@@ -43,8 +42,6 @@ static Value createDsReadTr(Operation *op, RewriterBase &rewriter, Location loc,
   const auto numElemsI32 = (vTy.getNumElements() * physicalBitWidth / 32);
   const auto vTyI32 = VectorType::get(numElemsI32, i32_ty);
 
-  // GFX1250 uses opaque LLVM intrinsic calls; their results cannot be cast to
-  // AliasAnalysisOpInterface, so no no-alias scope is attached.
   auto callIntrinsic = [&](StringRef name, VectorType retTy) -> Value {
     return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, name, {retTy},
                                            {vecAddr})
@@ -60,20 +57,14 @@ static Value createDsReadTr(Operation *op, RewriterBase &rewriter, Location loc,
     if (logicalBitWidth == 4)
       return callIntrinsic("llvm.amdgcn.ds.load.tr4.b64", vTyI32);
     return {};
-  case ISAFamily::CDNA4: {
-    Value dsReadTr;
+  case ISAFamily::CDNA4:
     if (logicalBitWidth == 16)
-      dsReadTr = ROCDL::ds_read_tr16_b64::create(rewriter, loc, vTy, vecAddr);
-    else if (logicalBitWidth == 8)
-      dsReadTr = ROCDL::ds_read_tr8_b64::create(rewriter, loc, vTyI32, vecAddr);
-    else if (logicalBitWidth == 4)
-      dsReadTr = ROCDL::ds_read_tr4_b64::create(rewriter, loc, vTyI32, vecAddr);
-    else
-      return {};
-    AMD::addLocalLoadNoAliasScope(
-        op, cast<LLVM::AliasAnalysisOpInterface>(dsReadTr.getDefiningOp()));
-    return dsReadTr;
-  }
+      return ROCDL::ds_read_tr16_b64::create(rewriter, loc, vTy, vecAddr);
+    if (logicalBitWidth == 8)
+      return ROCDL::ds_read_tr8_b64::create(rewriter, loc, vTyI32, vecAddr);
+    if (logicalBitWidth == 4)
+      return ROCDL::ds_read_tr4_b64::create(rewriter, loc, vTyI32, vecAddr);
+    return {};
   default:
     return {};
   }
@@ -82,16 +73,15 @@ static Value createDsReadTr(Operation *op, RewriterBase &rewriter, Location loc,
 // Emits a single ds_read_tr* operation at `vecAddr` and unpacks the loaded
 // vector into individual element Values. Returns an empty vector if the ISA
 // family does not support a ds_read_tr* instruction.
-SmallVector<Value> emitDsReadTr(Operation *op, Location loc, Value vecAddr,
-                                VectorType vTy, Type llvmElemTy,
-                                unsigned logicalBitWidth,
+SmallVector<Value> emitDsReadTr(Location loc, Value vecAddr, VectorType vTy,
+                                Type llvmElemTy, unsigned logicalBitWidth,
                                 ConversionPatternRewriter &rewriter,
                                 const ::triton::AMD::TargetInfo &targetInfo) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   const auto physicalBitWidth = getIntOrFloatOrPtrBitWidth(llvmElemTy);
   assert(physicalBitWidth == 16 || physicalBitWidth == 8);
 
-  Value dsReadTr = createDsReadTr(op, rewriter, loc, vecAddr, vTy,
+  Value dsReadTr = createDsReadTr(rewriter, loc, vecAddr, vTy,
                                   targetInfo.getISAFamily(), logicalBitWidth);
   if (!dsReadTr)
     return {};
@@ -104,8 +94,7 @@ SmallVector<Value> emitDsReadTr(Operation *op, Location loc, Value vecAddr,
 }
 
 LogicalResult
-lowerDsReadTr(Operation *op,
-              ::triton::AMD::TargetInfo::LDSTransLoadParams ldsParams,
+lowerDsReadTr(::triton::AMD::TargetInfo::LDSTransLoadParams ldsParams,
               Location loc, LinearLayout cvt, unsigned logicalBitWidth,
               SmallVector<Value> &vals, ArrayRef<Value> smemBases,
               Value affineOffset, uint64_t maskSpanAffineOffset,
@@ -411,7 +400,7 @@ lowerDsReadTr(Operation *op,
       auto vecAddr = b.gep(smemPtrTy, i8_ty, smemBaseVal, innerOffset,
                            LLVM::GEPNoWrapFlags::inbounds);
       llvm::append_range(vals,
-                         emitDsReadTr(op, loc, vecAddr, vecTy, llvmElemTy,
+                         emitDsReadTr(loc, vecAddr, vecTy, llvmElemTy,
                                       logicalBitWidth, rewriter, targetInfo));
     }
   }
@@ -523,7 +512,7 @@ public:
 
       SmallVector<Value> values;
       auto result =
-          lowerDsReadTr(op, ldsParams, loc, cvtDstLL, logicalBitWidth, values,
+          lowerDsReadTr(ldsParams, loc, cvtDstLL, logicalBitWidth, values,
                         smemBases, affineOffset, maskSpanAffineOffset,
                         paddingShifts, llvmElemTy, rewriter, targetInfo);
       if (failed(result))

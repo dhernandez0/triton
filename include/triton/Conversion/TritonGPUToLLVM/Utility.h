@@ -670,8 +670,7 @@ using LowerLdStCallback = std::function<SmallVector<Value>(
 
 LowerLdStCallback makeSharedStoreEmitter(const TargetInfoBase &targetInfo,
                                          Value pred);
-LowerLdStCallback makeSharedLoadEmitter(const TargetInfoBase &targetInfo,
-                                        Operation *localLoadOp = nullptr);
+LowerLdStCallback makeSharedLoadEmitter(const TargetInfoBase &targetInfo);
 
 // Lower an ld/st-like operation using a layout and instruction callback.
 // This is a close cousin of lowerLdStMatrix in MemoryOpToLLVM.cpp, but

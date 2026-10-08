@@ -7,7 +7,6 @@
 #include "triton/Version.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/CodeGen/MIRParser/MIRParser.h"
@@ -430,16 +429,6 @@ translateMIRToASM(const std::string &mirPath, const std::string &triple,
 
   // Create PassManager
   llvm::legacy::PassManager pass;
-
-  // IMPORTANT: Add ScopedNoAliasAAWrapperPass to ensure alias analysis
-  // understands !alias.scope and !noalias metadata during machine scheduling.
-  //
-  // When loading MIR directly (swap path), we skip the normal IR optimization
-  // passes that would register ScopedNoAliasAA. Without this, the machine
-  // scheduler cannot prove that async buffer loads (BUFFER_LOAD_DWORDX4_LDS)
-  // don't alias with LDS reads (DS_READ), resulting in unnecessary memory
-  // dependencies and ~30% performance regression.
-  pass.add(llvm::createScopedNoAliasAAWrapperPass());
 
   // Emit code from MIR
   std::string result;

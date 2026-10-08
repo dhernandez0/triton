@@ -1,4 +1,3 @@
-#include "AsyncUtility.h"
 #include "AtomicRMWOpsEmitter.h"
 #include "BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
@@ -568,8 +567,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       mask = b.false_val();
     }
 
-    llStore(rewriter, loc, ldsAddr, storeVal, b.icmp_ne(mask, b.true_val()),
-            CacheModifier::NONE, targetInfo.requiresAliasInfoForAsyncOps());
+    llStore(rewriter, loc, ldsAddr, storeVal, b.icmp_ne(mask, b.true_val()));
   }
 };
 
@@ -896,21 +894,17 @@ struct BufferLoadToLocalOpConversion
       if (isThreadPredWarpUniform && !hasOther) {
         Value predicatedAddress =
             selectLdsAddressForPredicate(b, threadPred, shmemAddr);
-        auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
-            vecTy, vecBytesVal, rsrcDesc, offsetElem, predicatedAddress,
-            maybeSwizzledMaskElem, cacheMod);
-        if (targetInfo.requiresAliasInfoForAsyncOps())
-          AMD::addAsyncCopyAliasScope(bufferLoadToLds);
+        bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetElem,
+                                    predicatedAddress, maybeSwizzledMaskElem,
+                                    cacheMod);
       } else {
         Value pred =
             hasOther ? b.and_(threadPred, maybeSwizzledMaskElem) : threadPred;
         auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, pred);
 
-        auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
+        bufferEmitter.emitLoadToLds(
             vecTy, vecBytesVal, rsrcDesc, offsetElem, shmemAddr,
             hasOther ? b.true_val() : maybeSwizzledMaskElem, cacheMod);
-        if (targetInfo.requiresAliasInfoForAsyncOps())
-          AMD::addAsyncCopyAliasScope(bufferLoadToLds);
 
         rewriter.setInsertionPointToStart(afterLoadBlock);
 
@@ -1107,11 +1101,9 @@ struct AsyncCopyGlobalToLocalOpConversion
 
     if (targetInfo.useAsyncMarks()) {
       // Use the async intrinsic so LLVM tracks these via asyncmark
-      auto asyncLoadOp = ROCDL::GlobalLoadAsyncLDSOp::create(
-          rewriter, loc, srcPtr, shmemAddr, vecBits / 8, /*offset=*/0u, auxAttr,
-          nullptr, nullptr, nullptr);
-      if (targetInfo.requiresAliasInfoForAsyncOps())
-        AMD::addAsyncCopyAliasScope(asyncLoadOp);
+      ROCDL::GlobalLoadAsyncLDSOp::create(rewriter, loc, srcPtr, shmemAddr,
+                                          vecBits / 8, /*offset=*/0u, auxAttr,
+                                          nullptr, nullptr, nullptr);
     } else if (targetInfo.getISAFamily() == ISAFamily::GFX1250) {
       switch (vecBits) {
       case 32:

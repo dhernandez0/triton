@@ -72,8 +72,7 @@ public:
   virtual void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                             Value ctaId, Value val, Value pred) const = 0;
   virtual Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                            Value ctaId, Type elemTy, Value pred,
-                            Operation *localLoadOp = nullptr) const = 0;
+                            Value ctaId, Type elemTy, Value pred) const = 0;
 
   void storeShared(RewriterBase &rewriter, Location loc, Value ptr, Value val,
                    Value pred) const {

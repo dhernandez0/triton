@@ -45,8 +45,7 @@ public:
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     Value ctaId, Value val, Value pred) const override;
   Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                    Value ctaId, Type elemTy, Value pred,
-                    Operation *localLoadOp = nullptr) const override;
+                    Value ctaId, Type elemTy, Value pred) const override;
   Value mapDShared(RewriterBase &rewriter, Location loc, Value ptr, Value ctaId,
                    Value pred) const;
 

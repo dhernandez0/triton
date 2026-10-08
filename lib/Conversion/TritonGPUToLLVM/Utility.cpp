@@ -782,17 +782,14 @@ LowerLdStCallback makeSharedStoreEmitter(const TargetInfoBase &targetInfo,
   };
 }
 
-LowerLdStCallback makeSharedLoadEmitter(const TargetInfoBase &targetInfo,
-                                        Operation *localLoadOp) {
-  return [&targetInfo, localLoadOp](RewriterBase &rewriter, Location loc,
-                                    ArrayRef<Value> vals, Value shmemAddr, int,
-                                    VectorType vecTy,
-                                    Value ctaId) -> SmallVector<Value> {
+LowerLdStCallback makeSharedLoadEmitter(const TargetInfoBase &targetInfo) {
+  return [&targetInfo](RewriterBase &rewriter, Location loc,
+                       ArrayRef<Value> vals, Value shmemAddr, int,
+                       VectorType vecTy, Value ctaId) -> SmallVector<Value> {
     assert(vals.empty());
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    Value valsVec =
-        targetInfo.loadDShared(rewriter, loc, shmemAddr, ctaId, vecTy,
-                               /*pred=*/b.true_val(), localLoadOp);
+    Value valsVec = targetInfo.loadDShared(rewriter, loc, shmemAddr, ctaId,
+                                           vecTy, /*pred=*/b.true_val());
     return unpackLLVector(loc, valsVec, rewriter);
   };
 }

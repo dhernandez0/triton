@@ -235,11 +235,6 @@ bool TargetFeatures::supportsBufferLoadToLocal() const {
                             getISAFamily());
 }
 
-bool TargetFeatures::requiresAliasInfoForAsyncOps() const {
-  return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
-                            getISAFamily());
-}
-
 bool TargetFeatures::useAsyncMarks() const {
   return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                             getISAFamily());

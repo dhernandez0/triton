@@ -1,6 +1,5 @@
 #include "TritonAMDGPUToLLVM/Passes.h"
 
-#include "AsyncUtility.h"
 #include "TargetInfo.h"
 #include "TritonAMDGPUToLLVM/MembarUtility.h"
 #include "third_party/amd/include/Analysis/AMDGPUAllocation.h"
@@ -34,9 +33,6 @@ struct TritonAMDGPUMembar
     };
     ModuleAllocation allocation(mod, allocationFn,
                                 targetInfo.getSharedMemoryPartitionSize());
-
-    if (targetInfo.requiresAliasInfoForAsyncOps())
-      AMD::annotateLocalLoadsSyncedViaAsyncWait(mod);
 
     ModuleMembarAnalysis membarPass(allocation, AMD::membarFilter);
     membarPass.run();
