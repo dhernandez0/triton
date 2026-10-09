@@ -20,6 +20,76 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
 
 // -----
 
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 8, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_evict_last
+  tt.func public @async_copy_evict_last(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
+                                       %arg2: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    // DEV scope (2 << 3) | HT (2).
+    // CHECK-COUNT-8: rocdl.global.load.async.to.lds.b32 {{.*}}, 18
+    // CHECK-NOT: rocdl.global.load.async.to.lds
+    %2 = ttg.async_copy_global_to_local %1, %arg2 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 8, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_evict_first
+  tt.func public @async_copy_evict_first(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
+                                        %arg2: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    // DEV scope (2 << 3) | NT (1).
+    // CHECK-COUNT-8: rocdl.global.load.async.to.lds.b32 {{.*}}, 17
+    // CHECK-NOT: rocdl.global.load.async.to.lds
+    %2 = ttg.async_copy_global_to_local %1, %arg2 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first>} : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 8, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_eviction_only
+  tt.func public @async_copy_eviction_only(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
+                                          %arg2: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    // CHECK-COUNT-8: rocdl.global.load.async.to.lds.b32 {{.*}}, 2
+    // CHECK-NOT: rocdl.global.load.async.to.lds
+    %2 = ttg.async_copy_global_to_local %1, %arg2 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 8, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_policy_fallback
+  tt.func public @async_copy_policy_fallback(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
+                                             %arg2: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    // CHECK-COUNT-8: rocdl.global.load.async.to.lds.b32 {{.*}}, 1
+    // CHECK-NOT: rocdl.global.load.async.to.lds
+    %2 = ttg.async_copy_global_to_local %1, %arg2 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_last>} : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
 #shared = #ttg.swizzled_shared<{vec = 8, perPhase = 2, maxPhase = 4, order = [1, 0]}>
 #smem = #ttg.shared_memory
@@ -175,6 +245,88 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     // CHECK-COUNT-8: llvm.amdgcn.global.store.async.from.lds.b32
     // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
     %2 = amdg.async_copy_local_to_global %arg1, %1 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Test async_copy_local_to_global with evict-last.
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_local_to_global_evict_last
+  tt.func public @async_copy_local_to_global_evict_last(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>},
+                                                        %arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    // DEV scope (2 << 3) | HT (2).
+    // CHECK: %[[HT_POLICY:.*]] = llvm.mlir.constant(18 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[HT_POLICY]])
+    // CHECK: %[[HT_POLICY_1:.*]] = llvm.mlir.constant(18 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[HT_POLICY_1]])
+    // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
+    %2 = amdg.async_copy_local_to_global %arg1, %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Test async_copy_local_to_global with evict-first.
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_local_to_global_evict_first
+  tt.func public @async_copy_local_to_global_evict_first(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>},
+                                                         %arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    // DEV scope (2 << 3) | NT (1).
+    // CHECK: %[[NT_POLICY:.*]] = llvm.mlir.constant(17 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[NT_POLICY]])
+    // CHECK: %[[NT_POLICY_1:.*]] = llvm.mlir.constant(17 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[NT_POLICY_1]])
+    // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
+    %2 = amdg.async_copy_local_to_global %arg1, %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first>} : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Test async_copy_local_to_global with eviction policy only.
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_local_to_global_eviction_only
+  tt.func public @async_copy_local_to_global_eviction_only(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>},
+                                                           %arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    // CHECK: %[[EVICTION_POLICY:.*]] = llvm.mlir.constant(2 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[EVICTION_POLICY]])
+    // CHECK: %[[EVICTION_POLICY_1:.*]] = llvm.mlir.constant(2 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[EVICTION_POLICY_1]])
+    // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
+    %2 = amdg.async_copy_local_to_global %arg1, %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Test async_copy_local_to_global policy fallback.
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: async_copy_local_to_global_policy_fallback
+  tt.func public @async_copy_local_to_global_policy_fallback(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>},
+                                                             %arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    // CHECK: %[[FALLBACK_POLICY:.*]] = llvm.mlir.constant(1 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[FALLBACK_POLICY]])
+    // CHECK: %[[FALLBACK_POLICY_1:.*]] = llvm.mlir.constant(1 : i32)
+    // CHECK-NEXT: llvm.call_intrinsic "llvm.amdgcn.global.store.async.from.lds.b128"({{.*}}, %[[FALLBACK_POLICY_1]])
+    // CHECK-NOT: llvm.amdgcn.global.store.async.from.lds
+    %2 = amdg.async_copy_local_to_global %arg1, %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_last>} : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
     tt.return
   }
 }

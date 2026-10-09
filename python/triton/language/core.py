@@ -2430,13 +2430,18 @@ def load(pointer, mask=None, other=None, *, cache_modifier="", eviction_policy="
     :type mask: Block of `triton.int1`, optional
     :param other: if `mask[idx]` is false, return `other[idx]`. If `other` is `None`, the masked-out value is undefined.
     :type other: Block, optional
-    :param cache_modifier: changes cache option in NVIDIA PTX
+    :param cache_modifier: controls cache behavior. On NVIDIA, this maps to PTX
+        cache operators. On AMD, this maps to architecture-specific cache
+        controls.
     :type cache_modifier: str, optional, should be one of {"", ".ca", ".cg", ".cv"}, where ".ca" stands for
         cache at all levels, ".cg" stands for cache at global level (cache in L2 and below, not L1),
         and ".cv" means don’t cache and fetch again. see
         `cache operator <https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#cache-operators>`_ for more details.
-    :param eviction_policy: changes eviction policy in NVIDIA PTX
-    :type eviction_policy: str, optional
+    :param eviction_policy: controls eviction priority. On NVIDIA, this maps to
+        PTX eviction policies. On AMD gfx1250, ``"evict_first"`` maps to a
+        non-temporal hint and ``"evict_last"`` maps to a high-temporal hint.
+        Plain global loads and other AMD targets ignore it.
+    :type eviction_policy: str, optional, should be one of {"", "evict_first", "evict_last"}
     :param volatile: changes volatile option in NVIDIA PTX
     :type volatile: bool, optional
     """
@@ -2490,11 +2495,16 @@ def store(pointer, value, mask=None, *, cache_modifier="", eviction_policy="", _
     :type value: Block
     :param mask: If `mask[idx]` is false, do not store `value[idx]` at `pointer[idx]`
     :type mask: Block of triton.int1, optional
-    :param cache_modifier: changes cache option in NVIDIA PTX
+    :param cache_modifier: controls cache behavior. On NVIDIA, this maps to PTX
+        cache operators. On AMD, this maps to architecture-specific cache
+        controls.
     :type cache_modifier: str, optional, should be one of {"", ".wb", ".cg", ".cs", ".wt"}, where ".wb" stands for
         cache write-back all coherent levels, ".cg" stands for cache global, ".cs" stands for cache streaming, ".wt"
         stands for cache write-through, see `cache operator <https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#cache-operators>`_ for more details.
-    :param eviction_policy: changes eviction policy in NVIDIA PTX
+    :param eviction_policy: controls eviction priority. On NVIDIA, this maps to
+        PTX eviction policies. On AMD gfx1250, ``"evict_first"`` maps to a
+        non-temporal hint and ``"evict_last"`` maps to a high-temporal hint.
+        Plain global stores and other AMD targets ignore it.
     :type eviction_policy: str, optional, should be one of {"", "evict_first", "evict_last"}
     """
     # `value` can be constexpr

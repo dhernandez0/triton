@@ -1550,13 +1550,12 @@ emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
   return success();
 }
 
-SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
-                                   ArrayRef<Value> desc,
-                                   ArrayRef<int64_t> blockShape, int numLanes,
-                                   int numWarps, int numCTAs,
-                                   ArrayRef<Value> offset, Value pred,
-                                   Type elementType, Value laneId, Value warpId,
-                                   Value ctaId, bool isSpeculative) {
+SmallVector<Value>
+emitTDMPrefetch(RewriterBase &rewriter, Location loc, ArrayRef<Value> desc,
+                ArrayRef<int64_t> blockShape, int numLanes, int numWarps,
+                int numCTAs, ArrayRef<Value> offset, Value pred,
+                Type elementType, Value laneId, Value warpId, Value ctaId,
+                bool isSpeculative, bool highTemporal) {
   // TDM prefetch uses the same syntax as a regular load. Each lane can prefetch
   // a different address; hardware aligns to a 256-byte boundary and makes that
   // 256-byte region available in L2. We distribute the nD tile (blockShape)
@@ -1627,8 +1626,15 @@ SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
                                         {kWarp, warpId},
                                         {kBlock, ctaId}});
 
+  // For L2 prefetches (scope above WGP), TH[0] selects a non-speculative
+  // prefetch and TH[1] selects high-temporal (HT), so TH=3 is a
+  // non-speculative HT prefetch. The disassembler names the field as if it
+  // were a load (TH_LOAD_NT for 1, TH_LOAD_HT for 2, TH_LOAD_LU for 3).
   constexpr int cacheScope = 8; // (8) = L2 scope
-  const int hintValue = cacheScope | static_cast<int>(!isSpeculative);
+  constexpr int nonSpeculativeTH = 1;
+  constexpr int highTemporalTH = 2;
+  const int hintValue = cacheScope | (highTemporal ? highTemporalTH : 0) |
+                        (isSpeculative ? 0 : nonSpeculativeTH);
   IntegerAttr hint = rewriter.getI32IntegerAttr(hintValue);
 
   // Iterate over each register and emit a prefetch intrinsic

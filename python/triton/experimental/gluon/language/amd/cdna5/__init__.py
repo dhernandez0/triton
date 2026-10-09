@@ -5,7 +5,7 @@ from ..._core import builtin, int8, uint8, int32, float8e4nv, tensor, _unwrap_if
 from .._ops import (_load_shared_fp4_repacked, _wmma, _verify_wmma, _mma_scaled, _scaled_upcast, scaled_downcast,
                     get_scaled_upcast_fp4_scale_layout)
 from .._layouts import AMDWMMALayout
-from ..cdna3 import buffer_load, buffer_store
+from ..cdna3 import _buffer_load_impl, _buffer_store_impl
 from ._layouts import PartitionedSharedLayout, make_partitioned_dot_layouts
 from . import tdm
 from . import async_copy
@@ -17,6 +17,45 @@ __all__ = [
     "buffer_load", "buffer_store", "get_wmma_scale_layout", "PartitionedSharedLayout", "make_partitioned_dot_layouts",
     "load_shared_fp4_repacked", "get_scaled_upcast_fp4_scale_layout"
 ]
+
+
+@builtin
+def buffer_load(ptr, offsets, mask=None, other=None, cache=None, eviction_policy="", _semantic=None):
+    """
+    AMD buffer load from global memory via a scalar base pointer and a tensor of
+    offsets instead of a tensor of pointers. This operation will load data
+    directly into registers.
+
+    Args:
+        ptr (pointer to scalar): Global memory scalar base pointer to load from.
+        offsets (tensor): Offsets tensor for the load operation.
+        mask (tensor, optional): Mask tensor for predicated loads. Defaults to None.
+        other (tensor or scalar, optional): Tensor or scalar providing default values for masked elements. Defaults to None.
+        cache (str, optional): Load cache modifier: ``".ca"``, ``".cg"``, ``".cs"`` or ``".cv"``. Defaults to ``None``.
+        eviction_policy (str, optional): ``"evict_last"`` sets the high-temporal (``TH_LOAD_HT``) hint and
+            ``"evict_first"`` sets the non-temporal (``TH_LOAD_NT``) hint. Ignored when ``cache`` is
+            ``".cs"`` or ``".cv"``. Defaults to ``""``.
+    """
+    return _buffer_load_impl(ptr, offsets, mask, other, cache, eviction_policy, _semantic)
+
+
+@builtin
+def buffer_store(stored_value, ptr, offsets, mask=None, cache=None, eviction_policy="", _semantic=None):
+    """
+    AMD buffer store a tensor directly to global memory via a scalar base
+    pointer and a tensor of offsets instead of a tensor of pointers.
+
+    Args:
+        stored_value (tensor to be stored): The tensor to be stored to global memory.
+        ptr (pointer to scalar): Global memory scalar base pointer to store to.
+        offsets (tensor): Offsets tensor for the store operation.
+        mask (tensor, optional): Mask tensor for predicated store. Defaults to None.
+        cache (str, optional): Store cache modifier: ``".wb"``, ``".cg"``, ``".cs"`` or ``".wt"``. Defaults to ``None``.
+        eviction_policy (str, optional): ``"evict_last"`` sets the high-temporal (``TH_STORE_HT``) hint and
+            ``"evict_first"`` sets the non-temporal (``TH_STORE_NT``) hint. Ignored when ``cache`` is
+            ``".cs"`` or ``".wt"``. Defaults to ``""``.
+    """
+    return _buffer_store_impl(stored_value, ptr, offsets, mask, cache, eviction_policy, _semantic)
 
 
 @builtin

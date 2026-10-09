@@ -51,13 +51,12 @@ public:
       assert(vecBits != 0);
       bool supportsClusterLoad =
           targetInfo.supportsClusterLoadBitWidth(vecBits);
-      // The cluster load intrinsic cannot represent LLVM volatile semantics,
-      // so use a regular load for volatile accesses.
-      if (multicastMask && supportsClusterLoad && !loadOp.getIsVolatile()) {
+      if (LLVM::AMD::usesClusterLoad(targetInfo, multicastMask, vecBits,
+                                     loadOp.getIsVolatile())) {
         std::string intrinsic =
             "llvm.amdgcn.cluster.load.b" + std::to_string(vecBits);
-        auto cacheModBits = LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            cacheMod, true, targetInfo);
+        auto cacheModBits = LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+            cacheMod, loadOp.getEvictionPolicy(), /*isLoad=*/true, targetInfo);
         // The intrinsics only works with int32 or vec of int32 for >32bit
         Type resTy = i32_ty;
         if (vecBits > 32) {

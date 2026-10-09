@@ -505,6 +505,7 @@ def MaskedLoadOp : TT_AMDGPU_Op<"masked_load", []> {
     Load operation with masking and multicast support. If the mask is true, loads from the given pointer. Works with LLVM types as a utility op for making LLVM conversion easier.
     On architectures supporting multicast, the `multicastMask`specifies which CTAs in the cluster request the same data. This allows the hardware to efficiently broadcast the
     data to multiple CTAs in the cluster.
+    `evictionPolicy` only takes effect when the load lowers to a cluster load; regular LLVM loads cannot carry it.
   }];
   let arguments = (ins
     LLVM_AnyPointer:$ptr,
@@ -512,6 +513,7 @@ def MaskedLoadOp : TT_AMDGPU_Op<"masked_load", []> {
     LLVM_Type:$falseVal,
     Optional<I32>:$multicastMask,
     DefaultValuedAttr<TT_CacheModifierAttr, "::mlir::triton::CacheModifier::NONE">:$cache,
+    DefaultValuedAttr<TT_EvictionPolicyAttr, "::mlir::triton::EvictionPolicy::NORMAL">:$evictionPolicy,
     DefaultValuedAttr<BoolAttr, "false">:$isVolatile,
     DefaultValuedAttr<BoolAttr, "false">:$forceNoAlias
   );
@@ -520,7 +522,7 @@ def MaskedLoadOp : TT_AMDGPU_Op<"masked_load", []> {
 
   let assemblyFormat = [{
     $ptr `,` $mask `,` $falseVal (`,` $multicastMask^)?
-    oilist(`cacheModifier` `=` $cache)
+    oilist(`cacheModifier` `=` $cache | `evictionPolicy` `=` $evictionPolicy)
     (`volatile` $isVolatile^)?
     (`forceNoAlias` $forceNoAlias^)?
     attr-dict `:` functional-type(operands, results)
@@ -916,7 +918,7 @@ def AsyncTDMCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_copy_global_to_local",
     Arg<TT_TensorDescType, "", [MemRead<GlobalMemory>]>:$desc,
     Arg<TTG_MemDescType, "", GenericSharedWrite>:$result,
     Arg<Optional<TTG_MemDescType>, "", BarrierSharedWrite>:$barrier,
-    DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache,
+    OptionalAttr<TT_CachePolicyAttr>:$cachePolicy,
     OptionalAttr<I32Attr>:$warp_used_hint
   );
 
@@ -926,12 +928,12 @@ def AsyncTDMCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_copy_global_to_local",
     OpBuilder<(ins "Value":$desc, "Value":$result), [{
       return build($_builder, $_state, desc, result,
                    /*barrier=*/static_cast<mlir::Value>(nullptr),
-                   /*cache=*/triton::CacheModifier::NONE,
+                   /*cachePolicy=*/triton::CachePolicyAttr(),
                    /*warp_used_hint=*/IntegerAttr());
     }]>,
     OpBuilder<(ins "Value":$desc, "Value":$result, "Value":$barrier), [{
       return build($_builder, $_state, desc, result, barrier,
-                   /*cache=*/triton::CacheModifier::NONE,
+                   /*cachePolicy=*/triton::CachePolicyAttr(),
                    /*warp_used_hint=*/IntegerAttr());
     }]>
   ];
@@ -961,7 +963,7 @@ def AsyncTDMFusedCopyGlobalToLocalOp : TT_AMDGPU_Op<"async_tdm_fused_copy_global
     Arg<Variadic<TT_TensorDescType>, "", [MemRead<GlobalMemory>]>:$descs,
     Arg<Variadic<TTG_MemDescType>, "", GenericSharedWrite>:$dests,
     DenseI32ArrayAttr:$warp_used_hints,
-    DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache
+    OptionalAttr<TT_CachePolicyAttr>:$cachePolicy
   );
 
   let results = (outs TTG_AsyncToken:$token);
@@ -999,7 +1001,7 @@ def AsyncTDMCopyLocalToGlobalOp : TT_AMDGPU_Op<"async_tdm_copy_local_to_global",
     Arg<TT_TensorDescType, "", [MemWrite<GlobalMemory>]>:$desc,
     Arg<TTG_MemDescType, "", GenericSharedRead>:$src,
     Arg<Optional<TTG_MemDescType>, "", BarrierSharedWrite>:$barrier,
-    DefaultValuedAttr<TT_CacheModifierAttr, "triton::CacheModifier::NONE">:$cache
+    OptionalAttr<TT_CachePolicyAttr>:$cachePolicy
   );
 
   let results = (outs TTG_AsyncToken:$token);
@@ -1159,6 +1161,9 @@ def TDMPrefetchOp : TT_AMDGPU_Op<"tdm_prefetch", [
     but it does not copy the data to local memory and instead only prefetches the data into the L2 cache.
     Speculative prefetches can generate more efficient assembly because they do not require out of bounds checks.
     However, they are dropped by the hardware in case the virtual address translation is not already cached at CU level.
+
+    `highTemporal` requests a high-temporal (HT) prefetch, which asks the caches to retain the data with higher
+    priority.
   }];
 
   let arguments = (ins
@@ -1166,6 +1171,7 @@ def TDMPrefetchOp : TT_AMDGPU_Op<"tdm_prefetch", [
     Variadic<I32>:$indices,
     I1:$pred,
     BoolAttr:$speculative,
+    UnitAttr:$highTemporal,
     // Optional attribute (intended for testing) that, when set, causes the prefetch operation to return the computed offsets.
     // This should not be used in production code and is only for validation or debugging purposes.
     OptionalAttr<UnitAttr>:$returnOffsets
@@ -1176,6 +1182,7 @@ def TDMPrefetchOp : TT_AMDGPU_Op<"tdm_prefetch", [
 
   let assemblyFormat = [{
     $desc `[` $indices `]` `,` $pred `,` `speculative` `=` $speculative
+    (`highTemporal` $highTemporal^)?
     (`returnOffsets` $returnOffsets^)?
     attr-dict `:` qualified(type($desc))
     (`->` type($maybeOffsets)^)?

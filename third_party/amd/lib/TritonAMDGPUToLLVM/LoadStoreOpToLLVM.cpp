@@ -31,6 +31,18 @@ using triton::amdgpu::ISAFamily;
 
 namespace {
 
+// LLVM has no way to attach a temporal hint to plain global loads and stores.
+void remarkIgnoredEvictionPolicy(Operation *op, Attribute cachePolicy,
+                                 const AMD::TargetInfo &targetInfo) {
+  auto policy = dyn_cast_if_present<triton::CachePolicyAttr>(cachePolicy);
+  if (!policy || policy.getEvictionPolicy() == triton::EvictionPolicy::NORMAL ||
+      targetInfo.getISAFamily() != ISAFamily::GFX1250)
+    return;
+  op->emitRemark() << "eviction_policy is ignored on global memory accesses; "
+                      "it is only honored by buffer, async copy, TDM and "
+                      "multicast cluster load operations";
+}
+
 Value emitCtaMulticastMaskIfSupported(RewriterBase &rewriter, Location loc,
                                       const AMD::TargetInfo &targetInfo,
                                       const LinearLayout &layout,
@@ -628,6 +640,15 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
           rewriter, loc, targetInfo, triton::gpu::toLinearLayout(tensorTy));
     }
 
+    auto cachePolicy =
+        dyn_cast_if_present<triton::CachePolicyAttr>(op.getCachePolicyAttr());
+    auto evictionPolicy = cachePolicy ? cachePolicy.getEvictionPolicy()
+                                      : triton::EvictionPolicy::NORMAL;
+    if (!LLVM::AMD::usesClusterLoad(targetInfo, multicastMask,
+                                    vec * valueElemTy.getIntOrFloatBitWidth(),
+                                    op.getIsVolatile()))
+      remarkIgnoredEvictionPolicy(op, cachePolicy, targetInfo);
+
     // vectorized iteration through all the pointer/mask/other elements
     const int valueElemNBits =
         std::max(8u, valueElemTy.getIntOrFloatBitWidth());
@@ -654,8 +675,9 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
             otherElems, vecStart);
 
-      Value loadVal = llLoad(rewriter, loc, ptr, vecTy, pred, falseVal,
-                             multicastMask, cacheMod, op.getIsVolatile());
+      Value loadVal =
+          llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, multicastMask,
+                 cacheMod, evictionPolicy, op.getIsVolatile());
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);
@@ -685,8 +707,9 @@ struct BufferLoadOpConversion
   LogicalResult
   matchAndRewrite(triton::amdgpu::BufferLoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto cacheModifier = LLVM::AMD::getCacheModifier(op.getCachePolicyAttr());
-    if (failed(cacheModifier)) {
+    auto cachePolicy = LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/true, targetInfo);
+    if (failed(cachePolicy)) {
       op.emitOpError("target cache policy is not supported on AMD targets");
       return failure();
     }
@@ -698,7 +721,7 @@ struct BufferLoadOpConversion
     Value ptr = op.getPtr();
     Value offset = op.getOffsets();
     Value mask = op.getMask();
-    auto cacheMod = *cacheModifier;
+    auto cachePolicyBits = *cachePolicy;
 
     // Converted values
     Value llPtr = adaptor.getPtr();
@@ -742,8 +765,9 @@ struct BufferLoadOpConversion
         falseVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
             otherElems, vecStart);
-      Value loadVal = bufferEmitter.emitLoad(
-          vecTy, rsrcDesc, offsetElems[vecStart], pred, falseVal, cacheMod);
+      Value loadVal =
+          bufferEmitter.emitLoad(vecTy, rsrcDesc, offsetElems[vecStart], pred,
+                                 falseVal, cachePolicyBits);
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);
@@ -773,12 +797,13 @@ struct BufferLoadToLocalOpConversion
   LogicalResult
   matchAndRewrite(triton::amdgpu::BufferLoadToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto cacheModifier = LLVM::AMD::getCacheModifier(op.getCachePolicyAttr());
-    if (failed(cacheModifier)) {
+    auto cachePolicy = LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/true, targetInfo);
+    if (failed(cachePolicy)) {
       op.emitOpError("target cache policy is not supported on AMD targets");
       return failure();
     }
-    auto cacheMod = *cacheModifier;
+    auto cachePolicyBits = *cachePolicy;
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
@@ -898,7 +923,7 @@ struct BufferLoadToLocalOpConversion
             selectLdsAddressForPredicate(b, threadPred, shmemAddr);
         auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
             vecTy, vecBytesVal, rsrcDesc, offsetElem, predicatedAddress,
-            maybeSwizzledMaskElem, cacheMod);
+            maybeSwizzledMaskElem, cachePolicyBits);
         if (targetInfo.requiresAliasInfoForAsyncOps())
           AMD::addAsyncCopyAliasScope(bufferLoadToLds);
       } else {
@@ -908,7 +933,7 @@ struct BufferLoadToLocalOpConversion
 
         auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
             vecTy, vecBytesVal, rsrcDesc, offsetElem, shmemAddr,
-            hasOther ? b.true_val() : maybeSwizzledMaskElem, cacheMod);
+            hasOther ? b.true_val() : maybeSwizzledMaskElem, cachePolicyBits);
         if (targetInfo.requiresAliasInfoForAsyncOps())
           AMD::addAsyncCopyAliasScope(bufferLoadToLds);
 
@@ -953,8 +978,9 @@ struct AsyncCopyGlobalToLocalOpConversion
   LogicalResult
   matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto cacheModifier = LLVM::AMD::getCacheModifier(op.getCachePolicyAttr());
-    if (failed(cacheModifier)) {
+    auto cachePolicy = LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/true, targetInfo);
+    if (failed(cachePolicy)) {
       op.emitOpError("target cache policy is not supported on AMD targets");
       return failure();
     }
@@ -1059,14 +1085,14 @@ struct AsyncCopyGlobalToLocalOpConversion
             selectLdsAddressForPredicate(b, cond, shmemAddr);
 
         emitAsyncLoad(rewriter, loc, targetInfo, vecBits, srcElem,
-                      predicatedAddress, *cacheModifier, multicastMask);
+                      predicatedAddress, *cachePolicy, multicastMask);
       } else {
         // For architectures not supporting per lane LDS addresses we need to
         // emit a branch.
         auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, cond);
 
         emitAsyncLoad(rewriter, loc, targetInfo, vecBits, srcElem, shmemAddr,
-                      *cacheModifier, multicastMask);
+                      *cachePolicy, multicastMask);
 
         rewriter.setInsertionPointToStart(afterLoadBlock);
       }
@@ -1097,13 +1123,10 @@ struct AsyncCopyGlobalToLocalOpConversion
 
   void emitAsyncLoad(RewriterBase &rewriter, Location loc,
                      AMD::TargetInfo targetInfo, int vecBits, Value srcPtr,
-                     Value shmemAddr, triton::CacheModifier cacheMod,
+                     Value shmemAddr, int32_t cachePolicy,
                      Value multicastMask) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    int32_t cacheModifiers =
-        mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            cacheMod, /*isLoad=*/true, targetInfo);
-    auto auxAttr = rewriter.getI32IntegerAttr(cacheModifiers);
+    auto auxAttr = rewriter.getI32IntegerAttr(cachePolicy);
 
     if (targetInfo.useAsyncMarks()) {
       // Use the async intrinsic so LLVM tracks these via asyncmark
@@ -1165,8 +1188,9 @@ struct AsyncCopyLocalToGlobalOpConversion
   matchAndRewrite(triton::amdgpu::AsyncCopyLocalToGlobalOp op,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto cacheModifier = LLVM::AMD::getCacheModifier(op.getCachePolicyAttr());
-    if (failed(cacheModifier)) {
+    auto cachePolicy = LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/false, targetInfo);
+    if (failed(cachePolicy)) {
       op.emitOpError("target cache policy is not supported on AMD targets");
       return failure();
     }
@@ -1215,7 +1239,7 @@ struct AsyncCopyLocalToGlobalOpConversion
         freeVarMasks, rewriter, loc, targetInfo);
 
     auto emitGlobalStoreLds =
-        [this, &op, &b, threadPred, dstPtrTy, cacheModifier = *cacheModifier](
+        [this, &op, &b, threadPred, dstPtrTy, cachePolicy = *cachePolicy](
             RewriterBase &rewriter, Location loc, ArrayRef<Value> storeValues,
             Value shmemAddr, int startIdx, VectorType vecTy,
             Value /*multicastMask*/) -> SmallVector<Value> {
@@ -1229,7 +1253,7 @@ struct AsyncCopyLocalToGlobalOpConversion
       auto [storeBlock, afterStoreBlock] = emitBranch(rewriter, loc, cond);
 
       emitAsyncStore(rewriter, loc, targetInfo, vecBits, dstElem, shmemAddr,
-                     cacheModifier);
+                     cachePolicy);
 
       rewriter.setInsertionPointToStart(afterStoreBlock);
 
@@ -1253,18 +1277,15 @@ struct AsyncCopyLocalToGlobalOpConversion
 
   void emitAsyncStore(RewriterBase &rewriter, Location loc,
                       AMD::TargetInfo targetInfo, int vecBits, Value dstPtr,
-                      Value shmemAddr, triton::CacheModifier cacheMod) const {
+                      Value shmemAddr, int32_t cachePolicy) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    int32_t cacheModifiers =
-        mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            cacheMod, /*isLoad=*/false, targetInfo);
 
     auto emitStore = [&](int bits, Value dst, Value shmem) {
       std::string intrinsic =
           "llvm.amdgcn.global.store.async.from.lds.b" + std::to_string(bits);
       LLVM::createLLVMIntrinsicCallOp(
           rewriter, loc, intrinsic, {},
-          {dst, shmem, b.i32_val(0), b.i32_val(cacheModifiers)});
+          {dst, shmem, b.i32_val(0), b.i32_val(cachePolicy)});
     };
 
     // If vecBits is not supported but vecBits/2 is, split into two
@@ -1365,9 +1386,12 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     if (auto hintAttr = op.getWarpUsedHintAttr())
       warpUsedHint = static_cast<uint32_t>(hintAttr.getInt());
 
-    auto cacheMod = op.getCache();
-    auto auxBits = mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-        cacheMod, /*isLoad*/ true, targetInfo);
+    auto auxBits = mlir::LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/true, targetInfo);
+    if (failed(auxBits)) {
+      op.emitOpError("target cache policy is not supported on AMD targets");
+      return failure();
+    }
 
     // Placeholder: the copy inherits pred from the descriptor.
     Value pred = b.i32_val(1);
@@ -1375,7 +1399,7 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
         padInterval, padAmount, offset, dstPtrs, pred, multicastMask,
         elementType, barrierPtr, /*isLoad=*/true, sharedLayout, encoding, ctaId,
-        auxBits, warpUsedHint, /*isPureForm=*/true);
+        *auxBits, warpUsedHint, /*isPureForm=*/true);
 
     rewriter.eraseOp(op);
     return success();
@@ -1435,10 +1459,14 @@ struct AsyncTDMFusedCopyGlobalToLocalOpConversion
       memberHints.push_back(static_cast<uint32_t>(op.getWarpUsedHints()[i]));
     }
 
-    auto auxBits = mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-        op.getCache(), /*isLoad*/ true, targetInfo);
+    auto auxBits = mlir::LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/true, targetInfo);
+    if (failed(auxBits)) {
+      op.emitOpError("target cache policy is not supported on AMD targets");
+      return failure();
+    }
     mlir::LLVM::AMD::emitTDMLoadFused(rewriter, loc, getTypeConverter(),
-                                      members, numWarps, ctaId, auxBits,
+                                      members, numWarps, ctaId, *auxBits,
                                       memberHints);
 
     rewriter.eraseOp(op);
@@ -1512,9 +1540,12 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
 
     auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
 
-    auto cacheMod = op.getCache();
-    auto auxBits = mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-        cacheMod, /*isLoad*/ false, targetInfo);
+    auto auxBits = mlir::LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/false, targetInfo);
+    if (failed(auxBits)) {
+      op.emitOpError("target cache policy is not supported on AMD targets");
+      return failure();
+    }
 
     // Placeholder: the copy inherits pred from the descriptor.
     Value pred = arith::ConstantIntOp::create(rewriter, loc, 1, 32);
@@ -1522,7 +1553,7 @@ struct AsyncTDMCopyLocalToGlobalOpConversion
         rewriter, loc, getTypeConverter(), desc, shapePerCTA, numWarps,
         padInterval, padAmount, offset, srcPtrs, pred,
         /*multicastMask=*/{}, elementType, barrierPtr,
-        /*isLoad=*/false, sharedLayout, encoding, ctaId, auxBits,
+        /*isLoad=*/false, sharedLayout, encoding, ctaId, *auxBits,
         /*warpUsedHint=*/std::nullopt, /*isPureForm=*/true);
 
     rewriter.eraseOp(op);
@@ -1732,6 +1763,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       op.emitOpError("target cache policy is not supported on AMD targets");
       return failure();
     }
+    remarkIgnoredEvictionPolicy(op, op.getCachePolicyAttr(), targetInfo);
     Value ptr = op.getPtr();
     Value value = op.getValue();
     Value mask = op.getMask();
@@ -2052,8 +2084,9 @@ struct BufferStoreOpConversion
   LogicalResult
   matchAndRewrite(triton::amdgpu::BufferStoreOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto cacheModifier = LLVM::AMD::getCacheModifier(op.getCachePolicyAttr());
-    if (failed(cacheModifier)) {
+    auto cachePolicy = LLVM::AMD::getCtrlBitsForCachePolicyOnTarget(
+        op.getCachePolicyAttr(), /*isLoad=*/false, targetInfo);
+    if (failed(cachePolicy)) {
       op.emitOpError("target cache policy is not supported on AMD targets");
       return failure();
     }
@@ -2066,7 +2099,7 @@ struct BufferStoreOpConversion
     Value offset = op.getOffsets();
     Value mask = op.getMask();
     Value data = op.getValue();
-    auto cacheMod = *cacheModifier;
+    auto cachePolicyBits = *cachePolicy;
 
     Value llPtr = adaptor.getPtr();
     Value llOffset = adaptor.getOffsets();
@@ -2115,7 +2148,7 @@ struct BufferStoreOpConversion
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
       bufferEmitter.emitStore(rsrcDesc, offsetElems[vecStart], storeVal, pred,
-                              cacheMod);
+                              cachePolicyBits);
     } // end vec
 
     rewriter.eraseOp(op);
@@ -2566,7 +2599,7 @@ struct TDMPrefetchConversion
     auto offsets = mlir::LLVM::AMD::emitTDMPrefetch(
         rewriter, loc, desc, blockShape, threadsPerWarp, numWarps, numCTAs,
         offset, op.getPred(), elementType, laneId, warpId, ctaId,
-        op.getSpeculative());
+        op.getSpeculative(), op.getHighTemporal());
 
     // If the op has no results, just erase it
     if (op->getNumResults() == 0) {

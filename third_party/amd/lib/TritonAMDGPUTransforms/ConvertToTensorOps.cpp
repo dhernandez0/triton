@@ -31,6 +31,14 @@ public:
     Attribute sharedMemorySpace = triton::gpu::SharedMemorySpaceAttr::get(ctx);
     auto loc = op.getLoc();
     auto tensorType = op.getResult().getType();
+    Attribute cachePolicyAttr = op.getCachePolicyAttr();
+    auto cachePolicy =
+        dyn_cast_or_null<triton::CachePolicyAttr>(cachePolicyAttr);
+    if (cachePolicyAttr && !cachePolicy) {
+      op.emitError() << "target cache policy is not supported on AMD targets";
+      return failure();
+    }
+
     auto encoding = getEncodingFromDescriptor(op, tensorType, op.getDesc());
     if (!encoding) {
       op.emitError() << "Could not create encoding for descriptor load";
@@ -47,7 +55,9 @@ public:
 
     Value desc = createUpdateTDMDescriptorOp(rewriter, loc, op.getDesc(),
                                              op.getIndices(), /*pred=*/pred);
-    amdgpu::AsyncTDMCopyGlobalToLocalOp::create(rewriter, loc, desc, alloc);
+    amdgpu::AsyncTDMCopyGlobalToLocalOp::create(
+        rewriter, loc, desc, alloc, /*barrier=*/Value{}, cachePolicy,
+        /*warp_used_hint=*/IntegerAttr{});
     amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
     rewriter.replaceOpWithNewOp<LocalLoadOp>(op, op.getType(), alloc);
     return success();
@@ -125,8 +135,9 @@ public:
     Value alloc = LocalAllocOp::create(rewriter, loc, memDescType, op.getSrc());
     Value copyDesc = createUpdateTDMDescriptorOp(
         rewriter, loc, op.getDesc(), op.getIndices(), /*pred=*/Value{});
-    amdgpu::AsyncTDMCopyLocalToGlobalOp::create(rewriter, loc, copyDesc, alloc,
-                                                /*barrier=*/Value{});
+    amdgpu::AsyncTDMCopyLocalToGlobalOp::create(
+        rewriter, loc, copyDesc, alloc, /*barrier=*/Value{},
+        /*cachePolicy=*/triton::CachePolicyAttr{});
     amdgpu::AsyncTDMWait::create(rewriter, loc, ArrayRef<Value>{}, 0);
     rewriter.eraseOp(op);
     return success();

@@ -34,6 +34,36 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
 // -----
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.padded_shared<[32:+4] {order = [1, 0], shape = [64, 64]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tdm_load_cache_policy
+  // DEV scope (2 << 3) composed with HT (2) and NT (1).
+  // CHECK-DAG: %[[LOAD_HT_AUX:.*]] = llvm.mlir.constant(18 : i32) : i32
+  // CHECK-DAG: %[[LOAD_NT_AUX:.*]] = llvm.mlir.constant(17 : i32) : i32
+  // CHECK-DAG: %[[LOAD_EVICTION_ONLY_AUX:.*]] = llvm.mlir.constant(2 : i32) : i32
+  // CHECK-DAG: %[[LOAD_FALLBACK_AUX:.*]] = llvm.mlir.constant(1 : i32) : i32
+  tt.func public @tdm_load_cache_policy(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %c_shape = arith.constant 128 : i32
+    %c_stride0 = arith.constant 128 : i64
+    %c_stride1 = arith.constant 1 : i64
+    %0 = tt.make_tensor_descriptor %arg0, [%c_shape, %c_shape], [%c_stride0, %c_stride1] : <f16>, <64x64xf16, #shared>
+    %1 = ttg.local_alloc : () -> !ttg.memdesc<64x64xf16, #shared, #smem, mutable>
+    // CHECK: "llvm.amdgcn.tensor.load.to.lds"({{.*}}, %[[LOAD_HT_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    %2 = amdg.async_tdm_copy_global_to_local %0 into %1 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : !tt.tensordesc<64x64xf16, #shared> -> !ttg.memdesc<64x64xf16, #shared, #smem, mutable>
+    // CHECK: "llvm.amdgcn.tensor.load.to.lds"({{.*}}, %[[LOAD_NT_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    %3 = amdg.async_tdm_copy_global_to_local %0 into %1 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first>} : !tt.tensordesc<64x64xf16, #shared> -> !ttg.memdesc<64x64xf16, #shared, #smem, mutable>
+    // CHECK: "llvm.amdgcn.tensor.load.to.lds"({{.*}}, %[[LOAD_EVICTION_ONLY_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    %4 = amdg.async_tdm_copy_global_to_local %0 into %1 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : !tt.tensordesc<64x64xf16, #shared> -> !ttg.memdesc<64x64xf16, #shared, #smem, mutable>
+    // CHECK: "llvm.amdgcn.tensor.load.to.lds"({{.*}}, %[[LOAD_FALLBACK_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    %5 = amdg.async_tdm_copy_global_to_local %0 into %1 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_last>} : !tt.tensordesc<64x64xf16, #shared> -> !ttg.memdesc<64x64xf16, #shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
 #shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
@@ -56,6 +86,35 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     amdg.async_tdm_copy_local_to_global %0 from %1: !ttg.memdesc<64x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<64x64xf16, #shared>
     // CHECK: rocdl.s.wait.tensorcnt 0
     %3 = amdg.async_tdm_intrinsic_wait  {count = 0 : i32}
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tdm_store_cache_policy
+  // CHECK-DAG: %[[STORE_HT_AUX:.*]] = llvm.mlir.constant(18 : i32) : i32
+  // CHECK-DAG: %[[STORE_NT_AUX:.*]] = llvm.mlir.constant(17 : i32) : i32
+  // CHECK-DAG: %[[STORE_EVICTION_ONLY_AUX:.*]] = llvm.mlir.constant(2 : i32) : i32
+  // CHECK-DAG: %[[STORE_FALLBACK_AUX:.*]] = llvm.mlir.constant(1 : i32) : i32
+  tt.func public @tdm_store_cache_policy(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %c_shape = arith.constant 128 : i32
+    %c_stride0 = arith.constant 128 : i64
+    %c_stride1 = arith.constant 1 : i64
+    %0 = tt.make_tensor_descriptor %arg0, [%c_shape, %c_shape], [%c_stride0, %c_stride1] : <f16>, <64x64xf16, #shared>
+    %1 = ttg.local_alloc : () -> !ttg.memdesc<64x64xf16, #shared, #smem, mutable>
+    // CHECK: "llvm.amdgcn.tensor.store.from.lds"({{.*}}, %[[STORE_HT_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    amdg.async_tdm_copy_local_to_global %0 from %1 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : !ttg.memdesc<64x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<64x64xf16, #shared>
+    // CHECK: "llvm.amdgcn.tensor.store.from.lds"({{.*}}, %[[STORE_NT_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    amdg.async_tdm_copy_local_to_global %0 from %1 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first>} : !ttg.memdesc<64x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<64x64xf16, #shared>
+    // CHECK: "llvm.amdgcn.tensor.store.from.lds"({{.*}}, %[[STORE_EVICTION_ONLY_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    amdg.async_tdm_copy_local_to_global %0 from %1 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : !ttg.memdesc<64x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<64x64xf16, #shared>
+    // CHECK: "llvm.amdgcn.tensor.store.from.lds"({{.*}}, %[[STORE_FALLBACK_AUX]]) : (vector<4xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<8xi32>, i32) -> ()
+    amdg.async_tdm_copy_local_to_global %0 from %1 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_last>} : !ttg.memdesc<64x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<64x64xf16, #shared>
     tt.return
   }
 }
@@ -208,6 +267,24 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
 
     // CHECK: rocdl.global.prefetch %{{.*}}, 8 : !llvm.ptr<1>
     amdg.tdm_prefetch %0[%c_offset, %c_offset], %c_pred, speculative = true : !tt.tensordesc<64x64xf16, #shared>
+    tt.return
+  }
+
+  // CHECK-LABEL: tdm_prefetch_high_temporal
+  tt.func public @tdm_prefetch_high_temporal(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %c_shape = arith.constant 128 : i32
+    %c_stride0 = arith.constant 128 : i64
+    %c_stride1 = arith.constant 1 : i64
+    %c_offset = arith.constant 0 : i32
+    %c_pred = arith.constant true
+    %0 = tt.make_tensor_descriptor %arg0, [%c_shape, %c_shape], [%c_stride0, %c_stride1] : <f16>, <64x64xf16, #shared>
+    // Non-speculative HT uses prefetch hint 3 plus L2 scope (8).
+    // CHECK: rocdl.global.prefetch %{{.*}}, 11 : !llvm.ptr<1>
+    amdg.tdm_prefetch %0[%c_offset, %c_offset], %c_pred, speculative = false highTemporal : !tt.tensordesc<64x64xf16, #shared>
+
+    // Speculative HT uses prefetch hint 2 plus L2 scope (8).
+    // CHECK: rocdl.global.prefetch %{{.*}}, 10 : !llvm.ptr<1>
+    amdg.tdm_prefetch %0[%c_offset, %c_offset], %c_pred, speculative = true highTemporal : !tt.tensordesc<64x64xf16, #shared>
     tt.return
   }
 }

@@ -9,6 +9,8 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
+#include "llvm/Support/Debug.h"
+
 namespace tt = mlir::triton;
 using mlir::triton::ModuleAxisInfoAnalysis;
 using mlir::triton::amdgpu::ISAFamily;
@@ -476,12 +478,19 @@ Value emitCtaMulticastMask(RewriterBase &rewriter, Location loc, Value groupId,
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, Value multicastMask,
-             triton::CacheModifier cm, bool isVolatile,
-             bool forceNoAliasAsyncLoads) {
+             triton::CacheModifier cm, triton::EvictionPolicy evictionPolicy,
+             bool isVolatile, bool forceNoAliasAsyncLoads) {
   return triton::amdgpu::MaskedLoadOp::create(
              rewriter, loc, elemTy, ptr, pred, falseVal, multicastMask, cm,
-             isVolatile, forceNoAliasAsyncLoads)
+             evictionPolicy, isVolatile, forceNoAliasAsyncLoads)
       .getResult();
+}
+
+bool usesClusterLoad(const mlir::triton::AMD::TargetInfo &targetInfo,
+                     Value multicastMask, int vecBits, bool isVolatile) {
+  // The cluster load intrinsic cannot represent LLVM volatile semantics.
+  return multicastMask && !isVolatile &&
+         targetInfo.supportsClusterLoadBitWidth(vecBits);
 }
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
@@ -737,6 +746,77 @@ int32_t getCtrlBitsForCacheModifierOnTarget(
   default:
     return getDefaultCtrlBitsForCacheModifier(cm);
   }
+}
+
+constexpr int kGfx1250LoadHighTemporalTH = 2;  // TH_LOAD_HT
+constexpr int kGfx1250StoreHighTemporalTH = 2; // TH_STORE_HT
+constexpr int kGfx1250NonTemporalTH = 1;       // TH_LOAD_NT / TH_STORE_NT
+
+int32_t getCtrlBitsForCachePolicyOnTarget(
+    triton::CacheModifier cacheModifier, triton::EvictionPolicy evictionPolicy,
+    bool isLoad, const mlir::triton::AMD::TargetInfo &targetInfo) {
+  if ((isLoad && (cacheModifier == triton::CacheModifier::WB ||
+                  cacheModifier == triton::CacheModifier::WT)) ||
+      (!isLoad && (cacheModifier == triton::CacheModifier::CA ||
+                   cacheModifier == triton::CacheModifier::CV))) {
+    DEBUG_WITH_TYPE(
+        "tritonamdgpu-cache-policy",
+        llvm::dbgs() << "Ignoring cache modifier that is incompatible with a "
+                     << (isLoad ? "load" : "store") << " operation\n");
+    cacheModifier = triton::CacheModifier::NONE;
+  }
+
+  int32_t aux =
+      getCtrlBitsForCacheModifierOnTarget(cacheModifier, isLoad, targetInfo);
+  if (targetInfo.getISAFamily() != ISAFamily::GFX1250 ||
+      evictionPolicy == triton::EvictionPolicy::NORMAL)
+    return aux;
+
+  constexpr int temporalHintMask = 0x7;
+
+  if (evictionPolicy == triton::EvictionPolicy::EVICT_FIRST) {
+    // Streaming and bypassing modifiers already express an equal or stronger
+    // preference not to retain the line.
+    if (llvm::is_contained({triton::CacheModifier::CS,
+                            triton::CacheModifier::CV,
+                            triton::CacheModifier::WT},
+                           cacheModifier))
+      return aux;
+    return (aux & ~temporalHintMask) | kGfx1250NonTemporalTH;
+  }
+
+  assert(evictionPolicy == triton::EvictionPolicy::EVICT_LAST);
+  // These modifiers explicitly request streaming, last-use, or write-through
+  // behavior and cannot be represented together with high temporal priority
+  // in the gfx1250 cache-policy field. Preserve the modifier and ignore the
+  // eviction policy.
+  if (llvm::is_contained({triton::CacheModifier::CS, triton::CacheModifier::CV,
+                          triton::CacheModifier::WT},
+                         cacheModifier)) {
+    DEBUG_WITH_TYPE("tritonamdgpu-cache-policy",
+                    llvm::dbgs()
+                        << "Ignoring eviction_policy=evict_last because the "
+                           "cache modifier selects incompatible temporal "
+                           "behavior\n");
+    return aux;
+  }
+  return (aux & ~temporalHintMask) |
+         (isLoad ? kGfx1250LoadHighTemporalTH : kGfx1250StoreHighTemporalTH);
+}
+
+FailureOr<int32_t> getCtrlBitsForCachePolicyOnTarget(
+    Attribute cachePolicy, bool isLoad,
+    const mlir::triton::AMD::TargetInfo &targetInfo) {
+  if (!cachePolicy)
+    return getCtrlBitsForCachePolicyOnTarget(triton::CacheModifier::NONE,
+                                             triton::EvictionPolicy::NORMAL,
+                                             isLoad, targetInfo);
+  auto policy = dyn_cast<triton::CachePolicyAttr>(cachePolicy);
+  if (!policy)
+    return failure();
+  return getCtrlBitsForCachePolicyOnTarget(policy.getCacheModifier(),
+                                           policy.getEvictionPolicy(), isLoad,
+                                           targetInfo);
 }
 
 Type getPointerTypeWithShape(Value basePtr, Value offset) {

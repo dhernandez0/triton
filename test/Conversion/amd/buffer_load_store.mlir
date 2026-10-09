@@ -2,6 +2,7 @@
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx950 | FileCheck %s --check-prefixes=CHECK,ATOMIC,CDNA
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1100 | FileCheck %s --check-prefixes=CHECK,ATOMIC,RDNA
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1170 | FileCheck %s --check-prefixes=CHECK,ATOMIC,RDNA
+// RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1250 | FileCheck %s --check-prefixes=CHECK,ATOMIC,GFX1250
 
 #blocked0 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
@@ -11,6 +12,107 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
         // CHECK: %[[offset:.*]] = llvm.select %[[c_mask]]
         // CHECK: rocdl.raw.ptr.buffer.load {{.*}}, %[[offset]], {{.*}}, {{.*}}
         %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_normal>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+}
+
+// -----
+
+#blocked0 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
+    // CHECK-LABEL: buffer_load_evict_last
+    tt.func @buffer_load_evict_last(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 3 :
+        // RDNA-SAME: , 1 :
+        // GFX1250-SAME: , 18 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // Eviction policies are ignored before gfx1250, so `.ca + evict_first`
+    // remains aux 0 there and becomes CU scope / NT (1) on gfx1250.
+    // CHECK-LABEL: buffer_load_evict_first
+    tt.func @buffer_load_evict_first(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 1 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = ca, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A conflicting eviction policy falls back to the cache modifier.
+    // CHECK-LABEL: buffer_load_streaming_evict_last
+    tt.func @buffer_load_streaming_evict_last(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 3 :
+        // RDNA-SAME: , 7 :
+        // GFX1250-SAME: , 1 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A store-only modifier on a load is ignored; evict_last is still honored.
+    // CHECK-LABEL: buffer_load_store_modifier_fallback
+    tt.func @buffer_load_store_modifier_fallback(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 2 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = wb, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_load_eviction_only_first
+    tt.func @buffer_load_eviction_only_first(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 1 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_load_eviction_only_last
+    tt.func @buffer_load_eviction_only_last(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 2 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_load_device_scope_evict_first
+    tt.func @buffer_load_device_scope_evict_first(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 3 :
+        // RDNA-SAME: , 1 :
+        // GFX1250-SAME: , 17 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A compatible streaming policy remains non-temporal.
+    // CHECK-LABEL: buffer_load_streaming_evict_first
+    tt.func @buffer_load_streaming_evict_first(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 3 :
+        // RDNA-SAME: , 7 :
+        // GFX1250-SAME: , 1 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A bypassing modifier takes precedence over evict_last.
+    // CHECK-LABEL: buffer_load_bypass_evict_last
+    tt.func @buffer_load_bypass_evict_last(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        // CHECK: rocdl.raw.ptr.buffer.load
+        // CDNA-SAME: , 17 :
+        // RDNA-SAME: , 7 :
+        // GFX1250-SAME: , 27 :
+        %ret = amdg.buffer_load %arg0[%offset] {cachePolicy = #tt.cache_policy<cache_modifier = cv, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
         tt.return
   }
 }
@@ -72,6 +174,114 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
         // CHECK: rocdl.raw.ptr.buffer.store {{.*}}, {{.*}}, %[[offset]], {{.*}}, {{.*}}
         %c256_i32 = arith.constant 256 : i32
         amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_normal>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+}
+
+// -----
+
+#blocked0 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
+    // CHECK-LABEL: buffer_store_evict_last
+    tt.func @buffer_store_evict_last(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 18 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_store_evict_first
+    tt.func @buffer_store_evict_first(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 1 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = wb, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A conflicting eviction policy falls back to the cache modifier.
+    // CHECK-LABEL: buffer_store_streaming_evict_last
+    tt.func @buffer_store_streaming_evict_last(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 3 :
+        // RDNA-SAME: , 7 :
+        // GFX1250-SAME: , 1 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A load-only modifier on a store is ignored; evict_last is still honored.
+    // CHECK-LABEL: buffer_store_load_modifier_fallback
+    tt.func @buffer_store_load_modifier_fallback(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 2 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = ca, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_store_eviction_only_first
+    tt.func @buffer_store_eviction_only_first(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 1 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_store_eviction_only_last
+    tt.func @buffer_store_eviction_only_last(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 2 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // CHECK-LABEL: buffer_store_device_scope_evict_first
+    tt.func @buffer_store_device_scope_evict_first(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 0 :
+        // RDNA-SAME: , 0 :
+        // GFX1250-SAME: , 17 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A compatible streaming policy remains non-temporal.
+    // CHECK-LABEL: buffer_store_streaming_evict_first
+    tt.func @buffer_store_streaming_evict_first(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 3 :
+        // RDNA-SAME: , 7 :
+        // GFX1250-SAME: , 1 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = cs, eviction_policy = evict_first>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
+        tt.return
+  }
+
+    // A bypassing modifier takes precedence over evict_last.
+    // CHECK-LABEL: buffer_store_bypass_evict_last
+    tt.func @buffer_store_bypass_evict_last(%value : tensor<128xf32, #blocked0>, %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offset : tensor<128xi32, #blocked0>{tt.divisibility=16:i32}) {
+        %c256_i32 = arith.constant 256 : i32
+        // CHECK: rocdl.raw.ptr.buffer.store
+        // CDNA-SAME: , 17 :
+        // RDNA-SAME: , 7 :
+        // GFX1250-SAME: , 27 :
+        amdg.buffer_store %value, %arg0[%offset] stride = %c256_i32 {cachePolicy = #tt.cache_policy<cache_modifier = wt, eviction_policy = evict_last>} : !tt.ptr<f32> -> tensor<128xf32, #blocked0>
         tt.return
   }
 }
@@ -227,7 +437,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
         // CHECK: %[[mask2:.*]] = llvm.and %[[mask1]], %[[mask0]]
         // CHECK: %[[offset:.*]] = llvm.select %[[mask2]]
         // ATOMIC-NEXT: %[[SOFFSET:.*]] = llvm.mlir.constant(0 : i32) : i32
-        // ATOMIC-NEXT: %[[CPOL:.*]] = llvm.mlir.constant(0 : i32) : i32
+        // CDNA-NEXT: %[[CPOL:.*]] = llvm.mlir.constant(0 : i32) : i32
+        // RDNA-NEXT: %[[CPOL:.*]] = llvm.mlir.constant(0 : i32) : i32
+        // GFX1250-NEXT: %[[CPOL:.*]] = llvm.mlir.constant(16 : i32) : i32
         // ATOMIC-NEXT: %[[result:.*]] = llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"({{.*}}, {{.*}}, %[[offset]], %[[SOFFSET]], %[[CPOL]]) : (f32, !llvm.ptr<8>, i32, i32, i32) -> f32
         // ATOMIC-COUNT-3: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
         // ATOMIC-NOT: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
@@ -248,7 +460,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
     // CHECK-LABEL: buffer_atomic_rmw_fadd_used
     tt.func @buffer_atomic_rmw_fadd_used(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %offsets : tensor<32xi32, #blocked0>{tt.divisibility=16:i32}, %values : tensor<32xf32, #blocked0>) -> tensor<32xf32, #blocked0> {
-        // CHECK: %[[CPOL:.*]] = llvm.mlir.constant(1 : i32) : i32
+        // CDNA: %[[CPOL:.*]] = llvm.mlir.constant(1 : i32) : i32
+        // RDNA: %[[CPOL:.*]] = llvm.mlir.constant(1 : i32) : i32
+        // GFX1250: %[[CPOL:.*]] = llvm.mlir.constant(17 : i32) : i32
         // CHECK-NEXT: %[[RESULT:.*]] = llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"({{.*}}, {{.*}}, {{.*}}, {{.*}}, %[[CPOL]]) : (f32, !llvm.ptr<8>, i32, i32, i32) -> f32
         // CHECK-NOT: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
         %ret = amdg.buffer_atomic_rmw fadd, relaxed, gpu, %values, %arg0[%offsets] : !tt.ptr<f32> -> tensor<32xf32, #blocked0>

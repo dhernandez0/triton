@@ -152,3 +152,19 @@ module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
     tt.return
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 2], threadsPerWarp = [4, 8], warpsPerCTA = [8, 1], order = [1, 0], CGALayout = [[0, 0], [1, 0]]}>
+#shared = #ttg.padded_shared<[128:+8] {offset = [[0, 1], [0, 2], [0, 4], [0, 8], [1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [32, 0]], block = [[0, 0], [64, 0]]}>
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: test_descriptor_load_cache_policy
+  // CHECK: amdg.async_tdm_copy_global_to_local {{.*}}cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>{{.*}}: !tt.tensordesc<128x16xf16, #shared> -> !ttg.memdesc<128x16xf16, #shared, #smem, mutable>
+  tt.func public @test_descriptor_load_cache_policy(
+      %desc: !tt.tensordesc<128x16xf16, #shared>,
+      %x: i32,
+      %y: i32) -> tensor<128x16xf16, #blocked> {
+    %0 = tt.descriptor_load %desc[%x, %y] {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : !tt.tensordesc<128x16xf16, #shared> -> tensor<128x16xf16, #blocked>
+    tt.return %0 : tensor<128x16xf16, #blocked>
+  }
+}

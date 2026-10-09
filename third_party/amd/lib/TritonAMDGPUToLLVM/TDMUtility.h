@@ -173,13 +173,12 @@ emitTDMGatherScatter(RewriterBase &rewriter, Location loc,
 // lanes to cover the entire TDM tile.
 // Returns the prefetched memory offsets. This should only be used for testing
 // purposes.
-SmallVector<Value> emitTDMPrefetch(RewriterBase &rewriter, Location loc,
-                                   ArrayRef<Value> desc,
-                                   ArrayRef<int64_t> blockShape, int numLanes,
-                                   int numWarps, int numCTAs,
-                                   ArrayRef<Value> offset, Value pred,
-                                   Type elementType, Value laneId, Value warpId,
-                                   Value ctaId, bool isSpeculative);
+SmallVector<Value>
+emitTDMPrefetch(RewriterBase &rewriter, Location loc, ArrayRef<Value> desc,
+                ArrayRef<int64_t> blockShape, int numLanes, int numWarps,
+                int numCTAs, ArrayRef<Value> offset, Value pred,
+                Type elementType, Value laneId, Value warpId, Value ctaId,
+                bool isSpeculative, bool highTemporal);
 
 } // namespace mlir::LLVM::AMD
 

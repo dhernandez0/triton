@@ -123,6 +123,39 @@ module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
 
 // -----
 
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0], CGALayout = [[0, 0], [0, 0]]}>
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: cluster_load_eviction_policy
+  tt.func public @cluster_load_eviction_policy(%arg0: tensor<32x32x!tt.ptr<f16>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>}) {
+    // CHECK: %[[EVICT_LAST:.*]] = llvm.mlir.constant(2 : i32) : i32
+    // CHECK-NEXT: llvm.amdgcn.cluster.load.b128{{.*}}, %[[EVICT_LAST]], {{.*}}
+    // REMARK-NOT: eviction_policy is ignored
+    %0 = tt.load %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : tensor<32x32x!tt.ptr<f16>, #blocked>
+    // CHECK: %[[CG_EVICT_LAST:.*]] = llvm.mlir.constant(18 : i32) : i32
+    // CHECK-NEXT: llvm.amdgcn.cluster.load.b128{{.*}}, %[[CG_EVICT_LAST]], {{.*}}
+    %1 = tt.load %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_last>} : tensor<32x32x!tt.ptr<f16>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// Volatile multicast loads use regular LLVM loads, which cannot carry the
+// eviction policy.
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0], CGALayout = [[0, 0], [0, 0]]}>
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
+  // CHECK-LABEL: volatile_cluster_load_eviction_policy
+  tt.func public @volatile_cluster_load_eviction_policy(%arg0: tensor<32x32x!tt.ptr<f16>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>}) {
+    // CHECK-NOT: llvm.amdgcn.cluster.load
+    // CHECK: llvm.load volatile
+    // REMARK: remark: eviction_policy is ignored on global memory accesses
+    %0 = tt.load %arg0 {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>, isVolatile = true} : tensor<32x32x!tt.ptr<f16>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
 // Note that we already check the correct multicast mask in previous tests, so we only check the cluster load instruction here
 #blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0], CGALayout = [[1, 0], [0, 0], [0, 0]]}>
 module attributes {"ttg.num-ctas" = 8 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {

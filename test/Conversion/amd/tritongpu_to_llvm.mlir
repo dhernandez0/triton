@@ -1,6 +1,8 @@
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --triton-amdgpu-membar='gfx-arch=gfx942' --convert-triton-amdgpu-to-llvm=gfx-arch=gfx942 --convert-builtin-func-to-llvm | FileCheck %s --enable-var-scope --check-prefixes=CHECK,COMMON
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --triton-amdgpu-membar='gfx-arch=gfx950' --convert-triton-amdgpu-to-llvm=gfx-arch=gfx950 | FileCheck %s --enable-var-scope --check-prefixes=GFX950,COMMON
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --triton-amdgpu-membar='gfx-arch=gfx1250' --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1250 | FileCheck %s --enable-var-scope --check-prefixes=GFX1250,COMMON
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory --triton-amdgpu-membar='gfx-arch=gfx1250' --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1250 2>&1 >/dev/null | FileCheck %s --check-prefix=REMARK-GFX1250
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory --triton-amdgpu-membar='gfx-arch=gfx950' --convert-triton-amdgpu-to-llvm=gfx-arch=gfx950 2>&1 >/dev/null | FileCheck %s --allow-empty --check-prefix=REMARK-GFX950
 
 // COMMON-DAG: [[$LOCAL_MMRA_TAG:#[A-Za-z0-9_]+]] = #llvm.mmra_tag<"amdgpu-synchronize-as":"local">
 // COMMON-DAG: [[$GLOBAL_MMRA_TAG:#[A-Za-z0-9_]+]] = #llvm.mmra_tag<"amdgpu-synchronize-as":"global">
@@ -1241,6 +1243,21 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
   // COMMON-NEXT: llvm.br ^[[EXIT]]
   tt.func public @assert_scalar(%arg0: i1) {
     tt.assert %arg0, "assert text" : i1
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32} {
+  // COMMON-LABEL: @global_load_store_eviction_policy
+  // REMARK-GFX950-NOT: eviction_policy is ignored
+  tt.func public @global_load_store_eviction_policy(%ptr: tensor<256x!tt.ptr<f32>, #blocked>) {
+    // REMARK-GFX1250: :[[@LINE+1]]:{{[0-9]+}}: remark: eviction_policy is ignored on global memory accesses; it is only honored by buffer, async copy, TDM and multicast cluster load operations
+    %value = tt.load %ptr {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last>} : tensor<256x!tt.ptr<f32>, #blocked>
+    // REMARK-GFX1250: :[[@LINE+1]]:{{[0-9]+}}: remark: eviction_policy is ignored on global memory accesses
+    tt.store %ptr, %value {cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_first>} : tensor<256x!tt.ptr<f32>, #blocked>
     tt.return
   }
 }

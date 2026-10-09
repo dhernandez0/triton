@@ -9,6 +9,7 @@ from itertools import product
 import triton
 import triton.language as tl
 from triton.backends.compiler import GPUTarget
+from triton.compiler.errors import CompilationError
 from triton._internal_testing import get_current_target, is_hip_gfx1250, str_to_triton_dtype, numpy_random, to_triton, unwrap_tensor, float_dtypes, int_dtypes, uint_dtypes
 from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
 from triton.experimental import gluon
@@ -2376,27 +2377,30 @@ def test_tensor_descriptor_load_store_invalid_blocksize():
 
 @gluon.jit
 def tensor_descriptor_prefetch_nd_kernel_device_tdm(a_ptr, shape, strides, BLOCK_SHAPE, SHARED_LAYOUT: ttgl.constexpr,
-                                                    PREFETCH_SPECULATIVE: ttgl.constexpr):
+                                                    PREFETCH_SPECULATIVE: ttgl.constexpr,
+                                                    EVICTION_POLICY: ttgl.constexpr):
     ndim: ttgl.constexpr = len(BLOCK_SHAPE)
     desc = ttgl.amd.cdna5.tdm.make_tensor_descriptor(base=a_ptr, shape=shape, strides=strides, block_shape=BLOCK_SHAPE,
                                                      layout=SHARED_LAYOUT)
     offs = (0, ) * ndim
-    ttgl.amd.cdna5.tdm.prefetch(desc, offs, speculative=PREFETCH_SPECULATIVE)
+    ttgl.amd.cdna5.tdm.prefetch(desc, offs, speculative=PREFETCH_SPECULATIVE, eviction_policy=EVICTION_POLICY)
 
 
 @gluon.jit
-def tensor_descriptor_prefetch_nd_kernel_host_tdm(inp_desc, SPECULATIVE: ttgl.constexpr):
+def tensor_descriptor_prefetch_nd_kernel_host_tdm(inp_desc, SPECULATIVE: ttgl.constexpr,
+                                                  EVICTION_POLICY: ttgl.constexpr):
     ndim: ttgl.constexpr = len(inp_desc.block_shape)
     offs = (0, ) * ndim
-    ttgl.amd.cdna5.tdm.prefetch(inp_desc, offs, speculative=SPECULATIVE)
+    ttgl.amd.cdna5.tdm.prefetch(inp_desc, offs, speculative=SPECULATIVE, eviction_policy=EVICTION_POLICY)
 
 
 @pytest.mark.parametrize("ndim", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("INNER_BLOCK", [8, 256])
 @pytest.mark.parametrize("dtype", ["i8", "fp16", "fp32", "fp64"])
 @pytest.mark.parametrize("SPECULATIVE", [True, False])
+@pytest.mark.parametrize("EVICTION_POLICY", ["", "evict_last"])
 @pytest.mark.parametrize("TDM_TYPE", ["DEVICE_TDM", "HOST_TDM"])
-def test_compile_tensor_descriptor_prefetch_nd(dtype, ndim, INNER_BLOCK, SPECULATIVE, TDM_TYPE):
+def test_compile_tensor_descriptor_prefetch_nd(dtype, ndim, INNER_BLOCK, SPECULATIVE, EVICTION_POLICY, TDM_TYPE):
     SHARED_LAYOUT = ttgl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1,
                                               order=[ndim - 1 - i for i in range(ndim)])
 
@@ -2413,6 +2417,7 @@ def test_compile_tensor_descriptor_prefetch_nd(dtype, ndim, INNER_BLOCK, SPECULA
             "BLOCK_SHAPE": tuple("constexpr" for _ in range(ndim)),
             "SHARED_LAYOUT": "constexpr",
             "PREFETCH_SPECULATIVE": "constexpr",
+            "EVICTION_POLICY": "constexpr",
         }
         constexprs = {
             # For tuples we need to specifiy the parameter index
@@ -2422,6 +2427,7 @@ def test_compile_tensor_descriptor_prefetch_nd(dtype, ndim, INNER_BLOCK, SPECULA
                for i in range(ndim)},
             "SHARED_LAYOUT": SHARED_LAYOUT,
             "PREFETCH_SPECULATIVE": SPECULATIVE,
+            "EVICTION_POLICY": EVICTION_POLICY,
         }
     else:
         assert TDM_TYPE == "HOST_TDM"
@@ -2429,19 +2435,47 @@ def test_compile_tensor_descriptor_prefetch_nd(dtype, ndim, INNER_BLOCK, SPECULA
         signature = {
             "inp_desc": f"tensordesc<{dtype}[{shape_str}],{SHARED_LAYOUT}>",
             "SPECULATIVE": "constexpr",
+            "EVICTION_POLICY": "constexpr",
         }
-        constexprs = {"SPECULATIVE": SPECULATIVE}
+        constexprs = {"SPECULATIVE": SPECULATIVE, "EVICTION_POLICY": EVICTION_POLICY}
 
     k = triton.compile(
         gluon._runtime.GluonASTSource(fn, signature, constexprs),
         target=GPUTarget("hip", 'gfx1250', 32),
     )
     amdgcn = k.asm["amdgcn"]
+    llir = k.asm["llir"]
 
     for pattern in ("global_prefetch_b8", "scope:SCOPE_SE"):
         assert re.search(pattern, amdgcn)
-    if not SPECULATIVE:
+    if EVICTION_POLICY == "evict_last" and SPECULATIVE:
+        assert re.search("th:TH_LOAD_HT", amdgcn)
+    elif EVICTION_POLICY == "evict_last":
+        # A non-speculative HT prefetch (TH=3) disassembles as TH_LOAD_LU.
+        assert re.search("th:TH_LOAD_LU", amdgcn)
+    elif not SPECULATIVE:
         assert re.search("th:TH_LOAD_NT", amdgcn)
+
+    expected_hint = 8 | (2 if EVICTION_POLICY == "evict_last" else 0) | int(not SPECULATIVE)
+    prefetch_calls = re.findall(r"(?:tail )?call void @llvm\.amdgcn\.global\.prefetch[^\n]+", llir)
+    assert prefetch_calls
+    assert all(re.search(rf", i32 {expected_hint}\)", call) for call in prefetch_calls)
+
+
+def test_compile_tensor_descriptor_prefetch_evict_first():
+    SHARED_LAYOUT = ttgl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
+    signature = {
+        "inp_desc": f"tensordesc<fp16[16, 64],{SHARED_LAYOUT}>",
+        "SPECULATIVE": "constexpr",
+        "EVICTION_POLICY": "constexpr",
+    }
+    constexprs = {"SPECULATIVE": True, "EVICTION_POLICY": "evict_first"}
+    with pytest.raises(CompilationError) as e:
+        triton.compile(
+            gluon._runtime.GluonASTSource(tensor_descriptor_prefetch_nd_kernel_host_tdm, signature, constexprs),
+            target=GPUTarget("hip", 'gfx1250', 32),
+        )
+    assert "tdm.prefetch only supports eviction_policy='evict_last'" in str(e.value.__cause__)
 
 
 @pytest.mark.parametrize("ndim", [1, 2, 3, 4, 5])
@@ -2471,11 +2505,11 @@ def test_runtime_tensor_descriptor_prefetch_nd(dtype_str, ndim, INNER_BLOCK, SPE
     if TDM_TYPE == "DEVICE_TDM":
         constexpr_block_shape = tuple(ttgl.constexpr(v) for v in BLOCK_SHAPE)
         tensor_descriptor_prefetch_nd_kernel_device_tdm[(1, )](inp, inp.shape, inp.stride(), constexpr_block_shape,
-                                                               SHARED_LAYOUT, SPECULATIVE)
+                                                               SHARED_LAYOUT, SPECULATIVE, "")
     else:
         assert TDM_TYPE == "HOST_TDM"
         inp_desc = gluon.amd.cdna5.TensorDescriptor.from_tensor(inp, list(BLOCK_SHAPE), layout=SHARED_LAYOUT)
-        tensor_descriptor_prefetch_nd_kernel_host_tdm[(1, )](inp_desc, SPECULATIVE)
+        tensor_descriptor_prefetch_nd_kernel_host_tdm[(1, )](inp_desc, SPECULATIVE, "")
 
 
 @gluon.jit
@@ -5033,88 +5067,159 @@ def test_runtime_tdm_gather_partial_column_block(N, num_warps, index_dtype):
 
 @gluon.jit
 def buffer_load_store_roundtrip_kernel(a_ptr, b_ptr, BLOCK: ttgl.constexpr, loadCM: ttgl.constexpr,
-                                       storeCM: ttgl.constexpr):
+                                       storeCM: ttgl.constexpr, loadEP: ttgl.constexpr, storeEP: ttgl.constexpr):
     BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([8], [32], [1], [0])
     pid = ttgl.program_id(axis=0)
     offs = pid * BLOCK + ttgl.arange(0, BLOCK, layout=BLOCKED_LAYOUT)
-    data = ttgl.amd.cdna5.buffer_load(ptr=a_ptr, offsets=offs, cache=loadCM)
-    ttgl.amd.cdna5.buffer_store(stored_value=data, ptr=b_ptr, offsets=offs, cache=storeCM)
+    data = ttgl.amd.cdna5.buffer_load(ptr=a_ptr, offsets=offs, cache=loadCM, eviction_policy=loadEP)
+    ttgl.amd.cdna5.buffer_store(stored_value=data, ptr=b_ptr, offsets=offs, cache=storeCM, eviction_policy=storeEP)
 
 
 @gluon.jit
 def async_load_store_roundtrip_kernel(a_ptr, b_ptr, BLOCK: ttgl.constexpr, loadCM: ttgl.constexpr,
-                                      storeCM: ttgl.constexpr):
+                                      storeCM: ttgl.constexpr, loadEP: ttgl.constexpr, storeEP: ttgl.constexpr):
     BLOCKED_LAYOUT: ttgl.constexpr = ttgl.BlockedLayout([8], [32], [1], [0])
     SHARED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK // 2, 8]], [BLOCK], [0])
     pid = ttgl.program_id(axis=0)
     offs = pid * BLOCK + ttgl.arange(0, BLOCK, layout=BLOCKED_LAYOUT)
     buffer = ttgl.allocate_shared_memory(ttgl.float16, shape=[BLOCK], layout=SHARED_LAYOUT)
-    ttgl.amd.cdna5.async_copy.global_to_shared(buffer, a_ptr + offs, cache_modifier=loadCM)
+    ttgl.amd.cdna5.async_copy.global_to_shared(buffer, a_ptr + offs, cache_modifier=loadCM, eviction_policy=loadEP)
     ttgl.amd.cdna5.async_copy.commit_group()
     ttgl.amd.cdna5.async_copy.wait_group(0)
-    ttgl.amd.cdna5.async_copy.shared_to_global(b_ptr + offs, buffer, cache_modifier=storeCM)
+    ttgl.amd.cdna5.async_copy.shared_to_global(b_ptr + offs, buffer, cache_modifier=storeCM, eviction_policy=storeEP)
 
 
 @gluon.jit
 def tdm_load_store_roundtrip_kernel(a_ptr, b_ptr, BLOCK: ttgl.constexpr, loadCM: ttgl.constexpr,
-                                    storeCM: ttgl.constexpr):
+                                    storeCM: ttgl.constexpr, loadEP: ttgl.constexpr, storeEP: ttgl.constexpr):
     SHARED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[BLOCK, 8]], [BLOCK], [0])
     pid = ttgl.program_id(axis=0)
 
     a_desc = ttgl.amd.cdna5.tdm.make_tensor_descriptor(base=a_ptr, shape=(BLOCK, ), strides=(1, ),
                                                        block_shape=(BLOCK, ), layout=SHARED_LAYOUT)
     buffer = ttgl.allocate_shared_memory(ttgl.float16, shape=[BLOCK], layout=SHARED_LAYOUT)
-    ttgl.amd.cdna5.tdm.async_load(a_desc, [pid * BLOCK], buffer, cache_modifier=loadCM)
+    ttgl.amd.cdna5.tdm.async_load(a_desc, [pid * BLOCK], buffer, cache_modifier=loadCM, eviction_policy=loadEP)
     ttgl.amd.cdna5.tdm.async_wait(0)
 
     b_desc = ttgl.amd.cdna5.tdm.make_tensor_descriptor(base=b_ptr, shape=(BLOCK, ), strides=(1, ),
                                                        block_shape=(BLOCK, ), layout=SHARED_LAYOUT)
-    ttgl.amd.cdna5.tdm.async_store(b_desc, [pid * BLOCK], buffer, cache_modifier=storeCM)
+    ttgl.amd.cdna5.tdm.async_store(b_desc, [pid * BLOCK], buffer, cache_modifier=storeCM, eviction_policy=storeEP)
     ttgl.amd.cdna5.tdm.async_wait(0)
 
 
-@pytest.mark.parametrize("loadCM, storeCM", [(".ca", ".wb"), (".cg", ".cg"), (".cs", ".cs"), (".cv", ".wt")])
-@pytest.mark.parametrize(
-    "test_kernel",
-    [buffer_load_store_roundtrip_kernel, async_load_store_roundtrip_kernel, tdm_load_store_roundtrip_kernel])
-def test_cache_modifier(loadCM, storeCM, test_kernel):
+CACHE_POLICY_CASES = [
+    ("", "", "", ""),
+    (".ca", ".wb", "", ""),
+    (".cg", ".cg", "", ""),
+    (".cs", ".cs", "", ""),
+    (".cv", ".wt", "", ""),
+    ("", "", "evict_first", "evict_first"),
+    ("", "", "evict_last", "evict_last"),
+    (".ca", ".wb", "evict_first", "evict_first"),
+    (".ca", ".wb", "evict_last", "evict_last"),
+    (".cg", ".cg", "evict_first", "evict_first"),
+    (".cg", ".cg", "evict_last", "evict_last"),
+    (".cs", ".cs", "evict_first", "evict_first"),
+    (".cs", ".cs", "evict_last", "evict_last"),
+    (".cv", ".wt", "evict_first", "evict_first"),
+    (".cv", ".wt", "evict_last", "evict_last"),
+    (".cs", ".wb", "evict_last", ""),
+    (".ca", ".cs", "", "evict_last"),
+]
+
+CACHE_POLICY_KERNELS = [
+    buffer_load_store_roundtrip_kernel, async_load_store_roundtrip_kernel, tdm_load_store_roundtrip_kernel
+]
+
+
+@pytest.mark.parametrize("loadCM, storeCM, loadEP, storeEP", CACHE_POLICY_CASES)
+@pytest.mark.parametrize("test_kernel", CACHE_POLICY_KERNELS)
+def test_cache_modifier(loadCM, storeCM, loadEP, storeEP, test_kernel):
     BLOCK = 256
     N = 256
 
     src = torch.rand((N, ), dtype=torch.float16).cuda()
     dst = torch.empty((N, ), dtype=torch.float16).cuda()
-    pgm = test_kernel[(triton.cdiv(N, BLOCK), )](src, dst, BLOCK, loadCM, storeCM, num_warps=1)
-
+    pgm = test_kernel[(triton.cdiv(N, BLOCK), )](src, dst, BLOCK, loadCM, storeCM, loadEP, storeEP, num_warps=1)
     torch.testing.assert_close(dst, src)
 
-    amdgcn = pgm.asm["amdgcn"]
+    _check_cache_policy_amdgcn(pgm.asm["amdgcn"], loadCM, storeCM, loadEP, storeEP)
 
+
+@pytest.mark.parametrize("loadCM, storeCM, loadEP, storeEP", CACHE_POLICY_CASES)
+@pytest.mark.parametrize("test_kernel", CACHE_POLICY_KERNELS)
+def test_compile_cache_modifier(loadCM, storeCM, loadEP, storeEP, test_kernel):
+    signature = {
+        "a_ptr": "*fp16", "b_ptr": "*fp16", "BLOCK": "constexpr", "loadCM": "constexpr", "storeCM": "constexpr",
+        "loadEP": "constexpr", "storeEP": "constexpr"
+    }
+    constexprs = {"BLOCK": 256, "loadCM": loadCM, "storeCM": storeCM, "loadEP": loadEP, "storeEP": storeEP}
+    attrs = {(0, ): [["tt.divisibility", 16]], (1, ): [["tt.divisibility", 16]]}
+    k = triton.compile(
+        gluon._runtime.GluonASTSource(test_kernel, signature, constexprs, attrs=attrs),
+        target=GPUTarget("hip", "gfx1250", 32),
+        options={"num_warps": 1},
+    )
+    _check_cache_policy_amdgcn(k.asm["amdgcn"], loadCM, storeCM, loadEP, storeEP)
+
+
+def _check_cache_policy_amdgcn(amdgcn, loadCM, storeCM, loadEP, storeEP):
     load_found = False
     store_found = False
     for line in amdgcn.split("\n"):
         if "buffer_load_b128" in line or "global_load_async_to_lds_b128" in line or "tensor_load_to_lds" in line:
             load_found = True
-            if loadCM == ".ca":
-                assert "scope" not in line and "th" not in line
             if loadCM == ".cg":
+                assert "scope:SCOPE_DEV" in line
+            if loadEP == "evict_first" and loadCM not in (".cs", ".cv"):
+                assert "th:TH_LOAD_NT" in line
+            elif loadEP == "evict_last" and loadCM not in (".cs", ".cv"):
+                assert "th:TH_LOAD_HT" in line
+            elif loadCM == ".ca":
+                assert "scope" not in line and "th" not in line
+            elif loadCM == ".cg":
                 assert "scope:SCOPE_DEV" in line and "th" not in line
-            if loadCM == ".cs":
+            elif loadCM == ".cs":
                 assert "scope" not in line and "th:TH_LOAD_NT" in line
-            if loadCM == ".cv":
+            elif loadCM == ".cv":
                 assert "scope:SCOPE_SYS" in line and "th:TH_LOAD_BYPASS" in line
         if "buffer_store_b128" in line or "global_store_async_from_lds_b128" in line or "tensor_store_from_lds" in line:
             store_found = True
-            if storeCM == ".wb":
-                assert "scope" not in line and "th" not in line
             if storeCM == ".cg":
+                assert "scope:SCOPE_DEV" in line
+            if storeEP == "evict_first" and storeCM not in (".cs", ".wt"):
+                assert "th:TH_STORE_NT" in line
+            elif storeEP == "evict_last" and storeCM not in (".cs", ".wt"):
+                assert "th:TH_STORE_HT" in line
+            elif storeCM == ".wb":
+                assert "scope" not in line and "th" not in line
+            elif storeCM == ".cg":
                 assert "scope:SCOPE_DEV" in line and "th" not in line
-            if storeCM == ".cs":
+            elif storeCM == ".cs":
                 assert "scope" not in line and "th:TH_STORE_NT" in line
-            if storeCM == ".wt":
+            elif storeCM == ".wt":
                 assert "scope:SCOPE_SYS" in line and "th:TH_STORE_BYPASS" in line
 
     assert load_found
     assert store_found
+
+
+@pytest.mark.parametrize("loadCM, storeCM, bad_modifier", [(".wb", "", ".wb"), (".wt", "", ".wt"), ("", ".ca", ".ca"),
+                                                           ("", ".cv", ".cv")])
+@pytest.mark.parametrize("test_kernel", CACHE_POLICY_KERNELS)
+def test_compile_cache_modifier_invalid(loadCM, storeCM, bad_modifier, test_kernel):
+    signature = {
+        "a_ptr": "*fp16", "b_ptr": "*fp16", "BLOCK": "constexpr", "loadCM": "constexpr", "storeCM": "constexpr",
+        "loadEP": "constexpr", "storeEP": "constexpr"
+    }
+    constexprs = {"BLOCK": 256, "loadCM": loadCM, "storeCM": storeCM, "loadEP": "", "storeEP": ""}
+    with pytest.raises(CompilationError) as e:
+        triton.compile(
+            gluon._runtime.GluonASTSource(test_kernel, signature, constexprs),
+            target=GPUTarget("hip", "gfx1250", 32),
+            options={"num_warps": 1},
+        )
+    assert f"Cache modifier {bad_modifier} not supported" in str(e.value.__cause__)
 
 
 # Multi-CTA batched matmul: each CTA in the cluster computes one batch of A @ B.

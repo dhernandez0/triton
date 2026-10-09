@@ -6,7 +6,7 @@ from triton.experimental.gluon.language import _core as ttgl
 from triton._C.libtriton import ir
 from ..._core import builtin, int8, uint8, _unwrap_if_constexpr
 from .._layouts import AMDMFMALayout
-from .._ops import _scaled_upcast, get_scaled_upcast_fp4_scale_layout
+from .._ops import _load_cache_policy, _scaled_upcast, _store_cache_policy, get_scaled_upcast_fp4_scale_layout
 from ..._semantic import _check
 
 if TYPE_CHECKING:
@@ -97,20 +97,7 @@ def _buffer_atomic_rmw_impl(op, ptr, offsets, value, arch, mask, sem, scope, _se
         value.type)
 
 
-@builtin
-def buffer_load(ptr, offsets, mask=None, other=None, cache=None, _semantic=None):
-    """
-    AMD buffer load from global memory via a scalar base pointer and a tensor of
-    offsets instead of a tensor of pointers. This operation will load data
-    directly into registers.
-
-    Args:
-        ptr (pointer to scalar): Global memory scalar base pointer to load from.
-        offsets (tensor): Offsets tensor for the load operation.
-        mask (tensor, optional): Mask tensor for predicated loads. Defaults to None.
-        other (tensor or scalar, optional): Tensor or scalar providing default values for masked elements. Defaults to None.
-        cache (str, optional): Cache modifier specifier. Defaults to ``None``.
-    """
+def _buffer_load_impl(ptr, offsets, mask, other, cache, eviction_policy, _semantic):
     _verify_buffer_ops(ptr, offsets, mask, other)
 
     mask = _unwrap_if_constexpr(mask)
@@ -125,13 +112,49 @@ def buffer_load(ptr, offsets, mask=None, other=None, cache=None, _semantic=None)
 
     other = other.handle if other is not None else ir.value()
     mask = mask.handle if mask is not None else ir.value()
-    cache = _unwrap_if_constexpr(cache)
-    cache_modifier = _semantic._str_to_load_cache_modifier(cache) if cache is not None else ir.CACHE_MODIFIER.NONE
+    cache_policy = _load_cache_policy(cache, eviction_policy, _semantic)
 
     ret_ty = offsets.type.with_element_ty(ptr.type.scalar.element_ty)
     builder = _semantic.builder
-    handle = builder.create_buffer_load(ret_ty.to_ir(builder), ptr.handle, offsets.handle, mask, other, cache_modifier)
+    handle = builder.create_buffer_load(ret_ty.to_ir(builder), ptr.handle, offsets.handle, mask, other,
+                                        cache_policy._to_ir(builder))
     return ttgl.tensor(handle, ret_ty)
+
+
+@builtin
+def buffer_load(ptr, offsets, mask=None, other=None, cache=None, _semantic=None):
+    """
+    AMD buffer load from global memory via a scalar base pointer and a tensor of
+    offsets instead of a tensor of pointers. This operation will load data
+    directly into registers.
+
+    Args:
+        ptr (pointer to scalar): Global memory scalar base pointer to load from.
+        offsets (tensor): Offsets tensor for the load operation.
+        mask (tensor, optional): Mask tensor for predicated loads. Defaults to None.
+        other (tensor or scalar, optional): Tensor or scalar providing default values for masked elements. Defaults to None.
+        cache (str, optional): Cache modifier specifier. Defaults to ``None``.
+    """
+    return _buffer_load_impl(ptr, offsets, mask, other, cache, None, _semantic)
+
+
+def _buffer_store_impl(stored_value, ptr, offsets, mask, cache, eviction_policy, _semantic):
+    _verify_buffer_ops(ptr, offsets, mask)
+
+    offsets_shape = offsets.shape
+    mask = _unwrap_if_constexpr(mask)
+    if mask is None:
+        offsets, stored_value = _semantic.broadcast_tensors(offsets, stored_value)
+    else:
+        offsets, stored_value, mask = _semantic.broadcast_tensors(offsets, stored_value, mask)
+    if offsets_shape != offsets.shape:
+        raise ValueError(f"Expected `offsets` argument to have shape {offsets.shape} but got {offsets_shape}")
+
+    mask = mask.handle if mask is not None else ir.value()
+    cache_policy = _store_cache_policy(cache, eviction_policy, _semantic)
+
+    _semantic.builder.create_buffer_store(stored_value.handle, ptr.handle, offsets.handle, mask,
+                                          cache_policy._to_ir(_semantic.builder))
 
 
 @builtin
@@ -147,22 +170,7 @@ def buffer_store(stored_value, ptr, offsets, mask=None, cache=None, _semantic: G
         mask (tensor, optional): Mask tensor for predicated store. Defaults to None.
         cache (str, optional): Cache modifier specifier. Defaults to ``None``.
     """
-    _verify_buffer_ops(ptr, offsets, mask)
-
-    offsets_shape = offsets.shape
-    mask = _unwrap_if_constexpr(mask)
-    if mask is None:
-        offsets, stored_value = _semantic.broadcast_tensors(offsets, stored_value)
-    else:
-        offsets, stored_value, mask = _semantic.broadcast_tensors(offsets, stored_value, mask)
-    if offsets_shape != offsets.shape:
-        raise ValueError(f"Expected `offsets` argument to have shape {offsets.shape} but got {offsets_shape}")
-
-    mask = mask.handle if mask is not None else ir.value()
-    cache = _unwrap_if_constexpr(cache)
-    cache_modifier = _semantic._str_to_store_cache_modifier(cache) if cache is not None else ir.CACHE_MODIFIER.NONE
-
-    _semantic.builder.create_buffer_store(stored_value.handle, ptr.handle, offsets.handle, mask, cache_modifier)
+    return _buffer_store_impl(stored_value, ptr, offsets, mask, cache, None, _semantic)
 
 
 # Attribute that carries `cd_regclass` on the dot op; read by the MFMA lowering.

@@ -15,6 +15,18 @@ _DOWNCAST_FORMAT_TO_ELEM_TYPE = {
 }
 
 
+def _load_cache_policy(cache_modifier, eviction_policy, semantic):
+    cache_modifier = _unwrap_if_constexpr(cache_modifier)
+    semantic._str_to_load_cache_modifier(cache_modifier)
+    return ttgl._normalize_cache_policy(None, cache_modifier, eviction_policy)
+
+
+def _store_cache_policy(cache_modifier, eviction_policy, semantic):
+    cache_modifier = _unwrap_if_constexpr(cache_modifier)
+    semantic._str_to_store_cache_modifier(cache_modifier)
+    return ttgl._normalize_cache_policy(None, cache_modifier, eviction_policy)
+
+
 def _downcast_format_to_elem_type(format):
     format = _unwrap_if_constexpr(format)
     _check(

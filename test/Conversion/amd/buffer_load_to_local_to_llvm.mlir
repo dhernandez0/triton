@@ -206,6 +206,25 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.thr
 
 // -----
 
+// Eviction policies are ignored on CDNA3/CDNA4.
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [1], order = [0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 64 : i32} {
+  // COMMON-LABEL: buffer_load_to_local_eviction_policy
+  tt.func public @buffer_load_to_local_eviction_policy(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
+                                %arg1: !ttg.memdesc<64xf32, #shared, #smem, mutable>) {
+    %0 = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32, #blocked>
+    // COMMON: rocdl.raw.ptr.buffer.load.async.lds {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, 0
+    %1 = amdg.buffer_load_to_local %arg0[%0] cachePolicy = #tt.cache_policy<cache_modifier = none, eviction_policy = evict_last> into %arg1: !tt.ptr<f32>[tensor<64xi32, #blocked>] -> <64xf32, #shared, #smem, mutable>
+    // COMMON: rocdl.raw.ptr.buffer.load.async.lds {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, {{.*}}, 3
+    %2 = amdg.buffer_load_to_local %arg0[%0] cachePolicy = #tt.cache_policy<cache_modifier = cg, eviction_policy = evict_first> into %arg1: !tt.ptr<f32>[tensor<64xi32, #blocked>] -> <64xf32, #shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 64], warpsPerCTA = [8, 1], order = [1, 0]}>
 #shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 4, order = [1, 0]}>
 #smem = #ttg.shared_memory

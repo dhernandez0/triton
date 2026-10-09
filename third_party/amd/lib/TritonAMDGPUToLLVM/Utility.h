@@ -67,10 +67,16 @@ getCacheModifierFlagsForLoadStore(const triton::CacheModifier &cm, MemoryOp op);
 // forceNoAliasAsyncLoads=true adds alias information to the llvm.load to
 // signal its not aliasing with any AsyncCopyGlobalToLocal/BufferLoadToLocal to
 // avoid conservative waits. See `addLocalLoadNoAliasScope` for more details
-Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, Value multicastMask,
-             triton::CacheModifier cm = triton::CacheModifier::NONE,
-             bool isVolatile = false, bool forceNoAliasAsyncLoads = false);
+Value llLoad(
+    RewriterBase &rewriter, Location loc, Value ptr, Type elemTy, Value pred,
+    Value falseVal, Value multicastMask,
+    triton::CacheModifier cm = triton::CacheModifier::NONE,
+    triton::EvictionPolicy evictionPolicy = triton::EvictionPolicy::NORMAL,
+    bool isVolatile = false, bool forceNoAliasAsyncLoads = false);
+
+// Whether a masked load lowers to llvm.amdgcn.cluster.load.
+bool usesClusterLoad(const mlir::triton::AMD::TargetInfo &targetInfo,
+                     Value multicastMask, int vecBits, bool isVolatile);
 
 // Stores to shared or global memory with predication.
 // forceNoAliasAsyncLoads=true adds alias information to the llvm.store to
@@ -83,7 +89,15 @@ void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
 // Get cache modifier information for creating load or store instruction
 // Get flags <volatile, nontemporal> for a predicated Load or Store
 std::pair<bool, bool> getCacheModifierFlagsForLoadStore(LLVM::CallOp);
-// Get the cachepolicy value for a cache modifier
+// Get the cache policy value for a cache modifier and eviction policy.
+int32_t
+getCtrlBitsForCachePolicyOnTarget(triton::CacheModifier, triton::EvictionPolicy,
+                                  bool, const mlir::triton::AMD::TargetInfo &);
+FailureOr<int32_t>
+getCtrlBitsForCachePolicyOnTarget(Attribute, bool,
+                                  const mlir::triton::AMD::TargetInfo &);
+
+// Get the cache policy value for a cache modifier.
 int32_t
 getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier, bool,
                                     const mlir::triton::AMD::TargetInfo &);

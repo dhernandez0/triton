@@ -67,7 +67,7 @@ struct BufferEmitter {
 
   // Emit a predicated rocdl.raw.ptr.buffer.load
   Value emitLoad(Type type, Value rsrcDesc, Value offset, Value pred,
-                 Value falseVal, CacheModifier cm);
+                 Value falseVal, int32_t cachePolicy);
 
   // Emit a rocdl.raw.ptr.buffer.load.async.lds for direct-to-LDS loads.
   // Always emits the async variant since buffer_load_to_lds is only supported
@@ -75,7 +75,7 @@ struct BufferEmitter {
   ROCDL::RawPtrBufferLoadAsyncLdsOp emitLoadToLds(Type type, Value byteWidth,
                                                   Value rsrcDesc, Value offset,
                                                   Value dst, Value pred,
-                                                  CacheModifier cm);
+                                                  int32_t cachePolicy);
 
   // Emit a predicated rocdl.raw.ptr.buffer.atomic.* RMWOp
   Value emitAtomicRMW(RMWOp rmwType, Type type, Value rsrcDesc, Value offset,
@@ -87,13 +87,13 @@ struct BufferEmitter {
 
   // Emit a predicated rocdl.raw.ptr.buffer.store
   void emitStore(Value rsrcDesc, Value offset, Value data, Value pred,
-                 CacheModifier cm);
+                 int32_t cachePolicy);
 
 private:
   // Fill common buffer operation arguments.
   void fillCommonArgs(Type type, Value rsrcDesc, Value vOffsetElems, Value pred,
-                      CacheModifier cm, bool isBufferLoad,
-                      SmallVector<Value> &args, int32_t &aux);
+                      int32_t cachePolicy, SmallVector<Value> &args,
+                      int32_t &aux);
 
   // Fill buffer atomics arguments
   void fillCommonArgsAtomics(Type type, Value rsrcDesc, Value vOffsetElems,

@@ -336,6 +336,7 @@ def vector_add_tdm_explicit_fused_kernel(
     HINT_A: ttgl.constexpr,
     HINT_B: ttgl.constexpr,
     CACHE: ttgl.constexpr,
+    EVICTION: ttgl.constexpr,
 ):
     """Two-tile vector add using the explicit fused TDM load API."""
     num_warps: ttgl.constexpr = ttgl.num_warps()
@@ -352,7 +353,8 @@ def vector_add_tdm_explicit_fused_kernel(
     a_desc = _position_input(a_desc, off_m, off_n)
     b_desc = _position_input(b_desc, off_m, off_n)
 
-    ttgl.amd.cdna5.tdm.async_load_fused([(a_desc, a_buf, HINT_A), (b_desc, b_buf, HINT_B)], cache_modifier=CACHE)
+    ttgl.amd.cdna5.tdm.async_load_fused([(a_desc, a_buf, HINT_A), (b_desc, b_buf, HINT_B)], cache_modifier=CACHE,
+                                        eviction_policy=EVICTION)
     ttgl.amd.cdna5.tdm.async_wait(0)
 
     c = a_buf.load(layout=BLOCKED_LAYOUT) + b_buf.load(layout=BLOCKED_LAYOUT)
@@ -415,7 +417,7 @@ def test_compile_vector_add_tdm_explicit_fused():
     amdgcn = _compile_amdgcn(
         vector_add_tdm_explicit_fused_kernel,
         ["a_ptr", "b_ptr", "c_ptr"],
-        {"BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": ""},
+        {"BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": "", "EVICTION": ""},
     )
     _assert_tensor_load_count(amdgcn, 1, "explicit async_load_fused")
 
@@ -425,12 +427,12 @@ def test_compile_vector_add_tdm_explicit_fused_cache_modifier():
     default_kernel = _compile_cdna5(
         vector_add_tdm_explicit_fused_kernel,
         ["a_ptr", "b_ptr", "c_ptr"],
-        {"BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": ""},
+        {"BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": "", "EVICTION": ""},
     )
     cg_kernel = _compile_cdna5(
         vector_add_tdm_explicit_fused_kernel,
         ["a_ptr", "b_ptr", "c_ptr"],
-        {"BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": ".cg"},
+        {"BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": ".cg", "EVICTION": ""},
     )
     _assert_tensor_load_count(cg_kernel.asm["amdgcn"], 1, "explicit async_load_fused cache modifier")
 
@@ -442,6 +444,43 @@ def test_compile_vector_add_tdm_explicit_fused_cache_modifier():
     assert len(cg_calls) == 1
     assert re.search(r", i32 0\)(?:, .*)?$", default_calls[0])
     assert re.search(r", i32 16\)(?:, .*)?$", cg_calls[0])
+
+
+def test_compile_vector_add_tdm_explicit_fused_eviction_policy():
+    """Compile-only: explicit fused Gluon API propagates eviction policy."""
+    eviction_kernel = _compile_cdna5(
+        vector_add_tdm_explicit_fused_kernel,
+        ["a_ptr", "b_ptr", "c_ptr"],
+        {
+            "BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": "", "EVICTION":
+            "evict_last"
+        },
+    )
+    _assert_tensor_load_count(eviction_kernel.asm["amdgcn"], 1, "explicit async_load_fused eviction policy")
+
+    # On CDNA5, evict_last lowers to CU scope / HT: aux = 2.
+    calls = _tdm_load_llir_calls(eviction_kernel.asm["llir"])
+    assert len(calls) == 1
+    assert re.search(r", i32 2\)(?:, .*)?$", calls[0])
+
+
+def test_compile_vector_add_tdm_explicit_fused_cache_modifier_and_eviction_policy():
+    """Compile-only: explicit fused Gluon API composes cache and eviction policy."""
+    combined_kernel = _compile_cdna5(
+        vector_add_tdm_explicit_fused_kernel,
+        ["a_ptr", "b_ptr", "c_ptr"],
+        {
+            "BLOCK_M": 64, "BLOCK_N": 64, "HINT_A": 0b00001111, "HINT_B": 0b11110000, "CACHE": ".cg", "EVICTION":
+            "evict_last"
+        },
+    )
+    _assert_tensor_load_count(combined_kernel.asm["amdgcn"], 1,
+                              "explicit async_load_fused cache modifier and eviction policy")
+
+    # On CDNA5, `.cg + evict_last` lowers to DEV scope / HT: aux = 18.
+    calls = _tdm_load_llir_calls(combined_kernel.asm["llir"])
+    assert len(calls) == 1
+    assert re.search(r", i32 18\)(?:, .*)?$", calls[0])
 
 
 # 3-way copies: covers regular hinted separation.
@@ -773,6 +812,7 @@ def test_runtime_vector_add_tdm_explicit_fused(BLOCK_M, BLOCK_N):
         BLOCK_N,
         0b00001111,
         0b11110000,
+        "",
         "",
         num_warps=NUM_WARPS,
     )

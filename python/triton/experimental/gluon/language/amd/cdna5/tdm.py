@@ -6,6 +6,7 @@ import triton.experimental.gluon.language._core as ttgl
 from triton.experimental.gluon.language._layouts import PaddedSharedLayout, SwizzledSharedLayout
 from triton.experimental.gluon.language.amd.cdna5 import PartitionedSharedLayout
 from triton.experimental.gluon.language._core import builtin, _unwrap_if_constexpr
+from .._ops import _load_cache_policy, _store_cache_policy
 
 if TYPE_CHECKING:
     from triton._C import ir
@@ -247,7 +248,7 @@ def update_tensor_descriptor(desc: tensor_descriptor, add_offsets: List[ttgl.con
 @builtin
 def async_load(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor] = None,
                dest: shared_memory_descriptor = None, pred=None, mbarrier: shared_memory_descriptor = None,
-               warp_used_hint=None, cache_modifier="", _semantic=None) -> None:
+               warp_used_hint=None, cache_modifier="", eviction_policy="", _semantic=None) -> None:
     """Load a block of tensor specified in tensor descriptor from global memory to shared memory asynchronously.
 
     This operation expects a prior :func:`update_tensor_descriptor` to position the
@@ -273,7 +274,10 @@ def async_load(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tenso
             4..7), ``0b01010101`` (warps 0,2,4,6).  Omit / ``None`` = all
             warps participate; explicit ``0`` and other invalid hints are
             rejected by the verifier.
-        cache_modifier (str, optional): Cache behavior.
+        cache_modifier (str, optional): Load cache modifier: ``".ca"``, ``".cg"``, ``".cs"`` or ``".cv"``.
+        eviction_policy (str, optional): ``"evict_last"`` sets the high-temporal (``TH_LOAD_HT``) hint and
+            ``"evict_first"`` sets the non-temporal (``TH_LOAD_NT``) hint. Ignored when ``cache_modifier``
+            is ``".cs"`` or ``".cv"``.
     """
     assert dest is not None, "async_load requires a dest shared_memory_descriptor"
     if offsets:
@@ -284,19 +288,19 @@ def async_load(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tenso
 
     mbarrier = _unwrap_if_constexpr(mbarrier)
     mbarrier_handle = mbarrier.handle if mbarrier is not None else ttgl.ir.value()
-    cache_modifier = _semantic._str_to_load_cache_modifier(cache_modifier)
+    cache_policy = _load_cache_policy(cache_modifier, eviction_policy, _semantic)
 
     warp_used_hint = _unwrap_if_constexpr(warp_used_hint)
     if warp_used_hint is not None:
         warp_used_hint = int(warp_used_hint)
 
-    _semantic.builder.create_async_tdm_copy_global_to_local(src.handle, dest.handle, mbarrier_handle, cache_modifier,
-                                                            warp_used_hint)
+    _semantic.builder.create_async_tdm_copy_global_to_local(src.handle, dest.handle, mbarrier_handle,
+                                                            cache_policy._to_ir(_semantic.builder), warp_used_hint)
 
 
 @builtin
 def async_load_fused(members: List[Tuple[tensor_descriptor, shared_memory_descriptor, ttgl.constexpr | int]],
-                     cache_modifier="", _semantic=None) -> None:
+                     cache_modifier="", eviction_policy="", _semantic=None) -> None:
     """Emit one explicit fused TDM load for 2-4 descriptor/destination pairs.
 
     This can perform better than several consecutive separate TDM loads,
@@ -308,12 +312,13 @@ def async_load_fused(members: List[Tuple[tensor_descriptor, shared_memory_descri
     Each member is ``(desc, dest, warp_used_hint)``. The descriptors must
     already encode their tile offsets, predicates, and bounds; use
     :func:`update_tensor_descriptor` before calling this helper when needed.
-    All members share one cache modifier, matching the fused IR operation.
+    All members share one cache policy, matching the fused IR operation.
 
     Args:
         members: 2-4 ``(desc, dest, warp_used_hint)`` tuples. Hints must be
             legal, pairwise-disjoint bitmasks.
-        cache_modifier (str, optional): Cache behavior shared by all members.
+        cache_modifier (str, optional): Load cache modifier shared by all members. See :func:`async_load`.
+        eviction_policy (str, optional): Eviction policy shared by all members. See :func:`async_load`.
     """
     members = _unwrap_if_constexpr(members)
     if not 2 <= len(members) <= 4:
@@ -343,15 +348,15 @@ def async_load_fused(members: List[Tuple[tensor_descriptor, shared_memory_descri
         dest_handles.append(dest.handle)
         warp_used_hints.append(int(warp_used_hint))
 
-    cache_modifier = _semantic._str_to_load_cache_modifier(cache_modifier)
+    cache_policy = _load_cache_policy(cache_modifier, eviction_policy, _semantic)
     _semantic.builder.create_async_tdm_fused_copy_global_to_local(desc_handles, dest_handles, warp_used_hints,
-                                                                  cache_modifier)
+                                                                  cache_policy._to_ir(_semantic.builder))
 
 
 @builtin
 def async_store(dest: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor] = None,
                 src: shared_memory_descriptor = None, mbarrier: shared_memory_descriptor = None, cache_modifier="",
-                _semantic=None) -> None:
+                eviction_policy="", _semantic=None) -> None:
     """Store a block of tensor specified in tensor descriptor from shared memory to global memory asynchronously.
 
     See :func:`async_load` for how the descriptor is positioned (a prior
@@ -364,6 +369,10 @@ def async_store(dest: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.ten
             pointer used to position the descriptor before the store.
         src (shared_memory_descriptor): the shared memory source to load the data.
         mbarrier (shared_memory_descriptor, optional): The barrier object to signal "arrive" on.
+        cache_modifier (str, optional): Store cache modifier: ``".wb"``, ``".cg"``, ``".cs"`` or ``".wt"``.
+        eviction_policy (str, optional): ``"evict_last"`` sets the high-temporal (``TH_STORE_HT``) hint and
+            ``"evict_first"`` sets the non-temporal (``TH_STORE_NT``) hint. Ignored when ``cache_modifier``
+            is ``".cs"`` or ``".wt"``.
     """
     assert src is not None, "async_store requires a src shared_memory_descriptor"
     if offsets:
@@ -371,8 +380,9 @@ def async_store(dest: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.ten
 
     mbarrier = _unwrap_if_constexpr(mbarrier)
     mbarrier_handle = mbarrier.handle if mbarrier is not None else ttgl.ir.value()
-    cache_modifier = _semantic._str_to_store_cache_modifier(cache_modifier)
-    _semantic.builder.create_async_tdm_copy_local_to_global(dest.handle, src.handle, mbarrier_handle, cache_modifier)
+    cache_policy = _store_cache_policy(cache_modifier, eviction_policy, _semantic)
+    _semantic.builder.create_async_tdm_copy_local_to_global(dest.handle, src.handle, mbarrier_handle,
+                                                            cache_policy._to_ir(_semantic.builder))
 
 
 @builtin
@@ -463,9 +473,16 @@ def async_gather(desc: tensor_descriptor, src_row_indices: ttgl.tensor, dst: sha
     _semantic.builder.create_async_tdm_gather(desc.handle, src_row_indices.handle, dst.handle, mbarrier_handle)
 
 
+def _prefetch_high_temporal(eviction_policy):
+    eviction_policy = _unwrap_if_constexpr(eviction_policy)
+    if eviction_policy not in (None, "", "evict_last"):
+        raise ValueError(f"tdm.prefetch only supports eviction_policy='evict_last', got {eviction_policy!r}")
+    return eviction_policy == "evict_last"
+
+
 @builtin
 def prefetch(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor], pred: bool = True,
-             speculative: bool = False, _semantic=None) -> None:
+             speculative: bool = False, eviction_policy: str = "", _semantic=None) -> None:
     """Prefetches a block of tensor specified in tensor descriptor from global memory into L2.
 
     Speculative prefetches can generate more efficient assembly because they do not require out of bounds checks.
@@ -477,23 +494,28 @@ def prefetch(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor]
         offsets (List[int]): the offsets from the base pointer in the tensor descriptor.
         pred (bool, optional): Predicate to enable or disable the prefetch. Defaults to True.
         speculative (bool, optional): Whether the prefetch is speculative. Defaults to False.
+        eviction_policy (str, optional): ``"evict_last"`` prefetches with the high-temporal (HT) hint.
+            No other eviction policy is supported.
     """
     offset_handles = _semantic._convert_to_ir_values(offsets, require_i64=False)
     pred = _semantic.to_tensor(pred)
     pred_handle = pred.handle
     speculative = _unwrap_if_constexpr(speculative)
-    _semantic.builder.create_tdm_prefetch(src.handle, offset_handles, pred_handle, speculative, False)
+    high_temporal = _prefetch_high_temporal(eviction_policy)
+    _semantic.builder.create_tdm_prefetch(src.handle, offset_handles, pred_handle, speculative, high_temporal, False)
 
 
 @builtin
 def _test_prefetch_with_offsets(src: tensor_descriptor, offsets: List[ttgl.constexpr | ttgl.tensor], pred: bool = True,
-                                speculative: bool = False, _semantic=None) -> ttgl.tensor:
+                                speculative: bool = False, eviction_policy: str = "", _semantic=None) -> ttgl.tensor:
     """Test-only prefetch variant that returns offsets for validation."""
     offset_handles = _semantic._convert_to_ir_values(offsets, require_i64=False)
     pred = _semantic.to_tensor(pred)
     pred_handle = pred.handle
     speculative = _unwrap_if_constexpr(speculative)
-    handle = _semantic.builder.create_tdm_prefetch(src.handle, offset_handles, pred_handle, speculative, True)
+    high_temporal = _prefetch_high_temporal(eviction_policy)
+    handle = _semantic.builder.create_tdm_prefetch(src.handle, offset_handles, pred_handle, speculative, high_temporal,
+                                                   True)
     shape = _semantic.builder.get_shape_from_tensor(handle)
     layout = _semantic.builder.get_gluon_layout_from_tensor(handle)
     ret_ty = ttgl.distributed_type(ttgl.int64, shape, layout)

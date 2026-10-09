@@ -1218,19 +1218,17 @@ void init_gluon_ir(py::module_ &m) {
            })
       .def("create_buffer_load",
            [](GluonOpBuilder &self, Type resultType, Value ptr, Value offsets,
-              Value mask, Value other,
-              tt::CacheModifier cacheModifier) -> Value {
-             return self.create<ttag::BufferLoadOp>(
-                 resultType, ptr, offsets, Value() /*stride*/,
-                 buildCachePolicy(self.getBuilder(), cacheModifier), mask,
-                 other);
+              Value mask, Value other, Attribute cachePolicy) -> Value {
+             return self.create<ttag::BufferLoadOp>(resultType, ptr, offsets,
+                                                    Value() /*stride*/,
+                                                    cachePolicy, mask, other);
            })
       .def("create_buffer_store",
            [](GluonOpBuilder &self, Value storedValue, Value ptr, Value offsets,
-              Value mask, tt::CacheModifier cacheModifier) {
-             self.create<ttag::BufferStoreOp>(
-                 storedValue, ptr, offsets, Value() /*stride*/,
-                 buildCachePolicy(self.getBuilder(), cacheModifier), mask);
+              Value mask, Attribute cachePolicy) {
+             self.create<ttag::BufferStoreOp>(storedValue, ptr, offsets,
+                                              Value() /*stride*/, cachePolicy,
+                                              mask);
            })
       .def("create_buffer_atomic_rmw",
            [](GluonOpBuilder &self, tt::RMWOp op, Value ptr, Value offsets,
@@ -1293,36 +1291,37 @@ void init_gluon_ir(py::module_ &m) {
       .def(
           "create_async_tdm_copy_global_to_local",
           [](GluonOpBuilder &self, Value descPtr, Value result, Value barrier,
-             tt::CacheModifier cacheModifier,
-             std::optional<uint32_t> warpUsedHint) {
+             Attribute cachePolicy, std::optional<uint32_t> warpUsedHint) {
             IntegerAttr hintAttr;
             if (warpUsedHint.has_value())
               hintAttr = self.getBuilder().getI32IntegerAttr(
                   static_cast<int32_t>(*warpUsedHint));
             self.create<ttag::AsyncTDMCopyGlobalToLocalOp>(
-                descPtr, result, barrier, cacheModifier, hintAttr);
+                descPtr, result, barrier,
+                cast_if_present<tt::CachePolicyAttr>(cachePolicy), hintAttr);
           },
           py::arg("descPtr"), py::arg("result"), py::arg("barrier"),
-          py::arg("cacheModifier"),
-          (py::arg("warpUsedHint").none() = py::none()))
+          py::arg("cachePolicy"), (py::arg("warpUsedHint").none() = py::none()))
       .def(
           "create_async_tdm_fused_copy_global_to_local",
           [](GluonOpBuilder &self, std::vector<Value> &descs,
              std::vector<Value> &dests, std::vector<int32_t> &warpUsedHints,
-             tt::CacheModifier cacheModifier) {
+             Attribute cachePolicy) {
             auto tokType = self.getBuilder().getType<ttg::AsyncTokenType>();
             auto hintAttr =
                 self.getBuilder().getDenseI32ArrayAttr(warpUsedHints);
             self.create<ttag::AsyncTDMFusedCopyGlobalToLocalOp>(
-                tokType, descs, dests, hintAttr, cacheModifier);
+                tokType, descs, dests, hintAttr,
+                cast_if_present<tt::CachePolicyAttr>(cachePolicy));
           },
           py::arg("descs"), py::arg("dests"), py::arg("warpUsedHints"),
-          py::arg("cacheModifier") = tt::CacheModifier::NONE)
+          py::arg("cachePolicy"))
       .def("create_async_tdm_copy_local_to_global",
            [](GluonOpBuilder &self, Value descPtr, Value src, Value barrier,
-              tt::CacheModifier cacheModifier) {
+              Attribute cachePolicy) {
              self.create<ttag::AsyncTDMCopyLocalToGlobalOp>(
-                 descPtr, src, barrier, cacheModifier);
+                 descPtr, src, barrier,
+                 cast_if_present<tt::CachePolicyAttr>(cachePolicy));
            })
       .def("create_update_tensor_descriptor",
            [](GluonOpBuilder &self, Value descPtr,
@@ -1350,9 +1349,10 @@ void init_gluon_ir(py::module_ &m) {
            })
       .def("create_tdm_prefetch",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
-              Value pred, bool speculative, bool returnOffsets) -> Value {
+              Value pred, bool speculative, bool highTemporal,
+              bool returnOffsets) -> Value {
              auto op = self.create<ttag::TDMPrefetchOp>(
-                 descPtr, indices, pred, speculative,
+                 descPtr, indices, pred, speculative, highTemporal,
                  returnOffsets ? UnitAttr::get(self.getContext()) : nullptr);
              return returnOffsets ? op->getResult(0) : nullptr;
            })

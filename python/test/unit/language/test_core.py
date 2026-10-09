@@ -5891,6 +5891,88 @@ def test_store_eviction_policy(eviction_policy, device):
         assert 'evict_first' in ptx
 
 
+@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires CDNA5")
+@pytest.mark.parametrize("cache_modifier", ["", ".cg"])
+@pytest.mark.parametrize("eviction_policy,load_hint,store_hint", [
+    ("evict_first", "TH_LOAD_NT", "TH_STORE_NT"),
+    ("evict_last", "TH_LOAD_HT", "TH_STORE_HT"),
+])
+def test_amd_cache_eviction_policy(cache_modifier, eviction_policy, load_hint, store_hint, device):
+    src = torch.rand(128, device=device)
+    dst = torch.empty_like(src)
+
+    @triton.jit
+    def _kernel(dst, src, CACHE: tl.constexpr, EVICTION: tl.constexpr):
+        offsets = tl.arange(0, 128)
+        value = tl.load(src + offsets, cache_modifier=CACHE, eviction_policy=EVICTION)
+        tl.store(dst + offsets, value, cache_modifier=CACHE, eviction_policy=EVICTION)
+
+    pgm = _kernel[(1, )](dst, src, CACHE=cache_modifier, EVICTION=eviction_policy)
+    torch.testing.assert_close(dst, src)
+
+    amdgcn = pgm.asm["amdgcn"]
+    load_lines = [line for line in amdgcn.splitlines() if "buffer_load" in line]
+    store_lines = [line for line in amdgcn.splitlines() if "buffer_store" in line]
+    assert load_lines and all(f"th:{load_hint}" in line for line in load_lines)
+    assert store_lines and all(f"th:{store_hint}" in line for line in store_lines)
+    if cache_modifier == ".cg":
+        assert all("scope:SCOPE_DEV" in line for line in load_lines + store_lines)
+
+
+@triton.jit
+def _amd_cache_eviction_policy_kernel(dst, src, start, CACHE: tl.constexpr, EVICTION: tl.constexpr):
+    offsets = start + tl.arange(0, 128)
+    value = tl.load(src + offsets, cache_modifier=CACHE, eviction_policy=EVICTION)
+    tl.store(dst + offsets, value, cache_modifier=CACHE, eviction_policy=EVICTION)
+
+
+def _compile_amd_cache_eviction_policy_kernel(cache_modifier, eviction_policy, within_2gb):
+    from triton.backends.compiler import GPUTarget
+
+    ptr_attrs = [["tt.divisibility", 16]]
+    if within_2gb:
+        ptr_attrs.append(["tt.pointer_range", 32])
+    src = triton.compiler.ASTSource(
+        fn=_amd_cache_eviction_policy_kernel,
+        signature={"dst": "*fp32", "src": "*fp32", "start": "i32", "CACHE": "constexpr", "EVICTION": "constexpr"},
+        constexprs={"CACHE": cache_modifier, "EVICTION": eviction_policy},
+        attrs={(0, ): ptr_attrs, (1, ): ptr_attrs},
+    )
+    return triton.compile(src, target=GPUTarget("hip", "gfx1250", 32)).asm["amdgcn"]
+
+
+@pytest.mark.skipif(not is_hip(), reason="Requires the AMD backend")
+@pytest.mark.parametrize("cache_modifier", ["", ".cg"])
+@pytest.mark.parametrize("eviction_policy,load_hint,store_hint", [
+    ("evict_first", "TH_LOAD_NT", "TH_STORE_NT"),
+    ("evict_last", "TH_LOAD_HT", "TH_STORE_HT"),
+])
+def test_compile_amd_cache_eviction_policy(cache_modifier, eviction_policy, load_hint, store_hint):
+    amdgcn = _compile_amd_cache_eviction_policy_kernel(cache_modifier, eviction_policy, within_2gb=True)
+
+    load_lines = [line for line in amdgcn.splitlines() if "buffer_load" in line]
+    store_lines = [line for line in amdgcn.splitlines() if "buffer_store" in line]
+    assert load_lines and all(f"th:{load_hint}" in line for line in load_lines)
+    assert store_lines and all(f"th:{store_hint}" in line for line in store_lines)
+    if cache_modifier == ".cg":
+        assert all("scope:SCOPE_DEV" in line for line in load_lines + store_lines)
+
+
+@pytest.mark.skipif(not is_hip(), reason="Requires the AMD backend")
+@pytest.mark.parametrize("use_buffer_ops,within_2gb", [(True, False), (False, True)])
+def test_compile_amd_cache_eviction_policy_global_ignored(use_buffer_ops, within_2gb, capfd, fresh_triton_cache,
+                                                          monkeypatch):
+    monkeypatch.setenv("MLIR_ENABLE_DIAGNOSTICS", "remarks")
+    with triton.knobs.amd.scope():
+        triton.knobs.amd.use_buffer_ops = use_buffer_ops
+        amdgcn = _compile_amd_cache_eviction_policy_kernel("", "evict_last", within_2gb)
+
+    assert "buffer_load" not in amdgcn and "buffer_store" not in amdgcn
+    memory_lines = [line for line in amdgcn.splitlines() if "global_load" in line or "global_store" in line]
+    assert memory_lines and all("th:" not in line for line in memory_lines)
+    assert "eviction_policy is ignored on global memory accesses" in capfd.readouterr().err
+
+
 # ---------------
 # test default
 # ---------------
