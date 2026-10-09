@@ -25,12 +25,8 @@ non-temporal, last-use, or write-through behavior.
    The instruction hint does not reserve GL2 capacity by itself. The
    application or framework must also call
    ``hipDeviceSetLimit(hipLimitPersistingL2CacheSize, bytes)`` to reserve GL2
-   ways for persisting lines. Triton does not currently expose a helper for
-   this limit, and its bundled HIP header does not yet define
-   ``hipLimitPersistingL2CacheSize``. Until a HIP version providing that limit
-   is available, the reservation must be configured externally. Without a
-   reservation, the hint is not guaranteed to improve residency or
-   performance.
+   ways for persisting lines. Without a reservation, the hint is not guaranteed
+   to improve residency or performance.
 
 .. autosummary::
     :toctree: generated
