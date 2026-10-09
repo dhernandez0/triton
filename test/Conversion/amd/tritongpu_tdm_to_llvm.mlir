@@ -1,5 +1,8 @@
 // RUN: triton-opt %s --split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1250 --convert-builtin-func-to-llvm | FileCheck %s
 // RUN: triton-opt %s --split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1250-strict --convert-builtin-func-to-llvm | FileCheck %s --check-prefix=STRICT
+// RUN: not triton-opt %s --split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=gfx-arch=gfx950 --convert-builtin-func-to-llvm 2>&1 | FileCheck %s --check-prefix=GFX950-ERR
+
+// GFX950-ERR: error: 'amdg.tdm_prefetch' op is only supported on gfx1250
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
 #shared = #ttg.padded_shared<[32:+4] {order = [1, 0], shape = [64, 64]}>

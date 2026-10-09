@@ -2577,6 +2577,11 @@ struct TDMPrefetchConversion
   LogicalResult
   matchAndRewrite(triton::amdgpu::TDMPrefetchOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (targetInfo.getISAFamily() != ISAFamily::GFX1250) {
+      op.emitOpError("is only supported on gfx1250");
+      return failure();
+    }
+
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
